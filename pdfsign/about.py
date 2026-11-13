@@ -20,8 +20,6 @@ from . import crypto
 APP_NAME = "PDF Мультиподпись"
 AUTHOR = "Петровский Дмитрий"
 AUTHOR_EMAIL = "tripswarlock@gmail.com"
-PROJECT_URL = "https://github.com/Tripswarlock/pdf-sign-stamp"
-REFERENCE_NOTE = "подход взят из проекта «Штамп ЭП» (stamp-ep-sa-main)"
 
 
 def _components_html() -> str:
@@ -83,9 +81,7 @@ def build_about_html() -> str:
     <h3 style="margin-bottom:4px;">Автор</h3>
     <p style="margin-top:0;">
         <b>{AUTHOR}</b><br>
-        Email: <a href="mailto:{AUTHOR_EMAIL}">{AUTHOR_EMAIL}</a><br>
-        GitHub: <a href="{PROJECT_URL}">{PROJECT_URL}</a><br>
-        <span style="color:{muted};">{REFERENCE_NOTE}</span>
+        Email: <a href="mailto:{AUTHOR_EMAIL}">{AUTHOR_EMAIL}</a>
     </p>
 
     <h3 style="margin-bottom:4px;">Что делает программа</h3>
@@ -107,15 +103,6 @@ def build_about_html() -> str:
         <b style="color:{state_color};">{'Доступен' if available else 'Недоступен'}</b><br>
         <span style="color:{muted};">{crypto_note}</span>
     </p>
-
-    <h3 style="margin-bottom:4px;">Конфиденциальность и безопасность</h3>
-    <ul style="margin-top:0;">
-        <li>Нет сетевых запросов, телеметрии и автообновления.</li>
-        <li>PIN не сохраняется: его обрабатывает CryptoPro или он живёт только в памяти операции.</li>
-        <li>Закрытые ключи не извлекаются, не копируются и не экспортируются.</li>
-        <li>PDF, сертификаты и подписи не покидают компьютер.</li>
-        <li>Отзыв сертификата (CRL/OCSP) не проверяется — офлайн-профиль.</li>
-    </ul>
 
     <h3 style="margin-bottom:4px;">Ответственность</h3>
     <p style="margin-top:0;color:{muted};">
