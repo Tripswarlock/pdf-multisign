@@ -375,7 +375,7 @@ class MainWindow(QMainWindow):
         options_card, opt_layout = _card("Параметры подписи")
         _shadow(options_card)
         self._visible = QCheckBox("Видимый блок подписи на странице")
-        self._visible.setChecked(True)
+        self._visible.setChecked(False)
         opt_layout.addWidget(self._visible)
 
         page_row = QHBoxLayout()

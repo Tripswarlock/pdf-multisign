@@ -73,6 +73,7 @@ Description: Подпись PDF несколькими подписями Crypto
 def _iter_sources():
     yield ROOT / "pdfsign", "pdfsign"
     yield ROOT / "vendor-linux", "vendor"
+    yield ROOT / "resources", "resources"
     yield ROOT / "bootstrap.py", "bootstrap.py"
     yield ROOT / "README.md", "README.md"
     yield ROOT / "LICENSE", "LICENSE"

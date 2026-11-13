@@ -62,7 +62,7 @@ def stylesheet() -> str:
         background: transparent;
         color: {PRIMARY};
         border: 1px solid {OUTLINE};
-        border-radius: 20px;
+        border-radius: 10px;
         padding: 9px 20px;
         font-weight: 600;
     }}
@@ -74,7 +74,7 @@ def stylesheet() -> str:
         background: {PRIMARY};
         color: {ON_PRIMARY};
         border: none;
-        border-radius: 20px;
+        border-radius: 10px;
         padding: 12px 26px;
         font-weight: 600;
         font-size: 15px;
@@ -87,12 +87,20 @@ def stylesheet() -> str:
         background: {SECONDARY_CONTAINER};
         color: {ON_SECONDARY_CONTAINER};
         border: none;
-        border-radius: 20px;
+        border-radius: 10px;
         padding: 9px 18px;
     }}
     QPushButton#Tonal:hover {{ background: #C7DBF8; }}
 
-    QPushButton#Text {{ border: none; padding: 6px 10px; color: {PRIMARY}; }}
+    QPushButton#Text {{
+        background: transparent;
+        border: 1px solid transparent;
+        border-radius: 10px;
+        padding: 6px 12px;
+        color: {PRIMARY};
+    }}
+    QPushButton#Text:hover {{ background: {SURFACE_CONTAINER_HIGH}; }}
+    QPushButton#Text:pressed {{ background: {SURFACE_VARIANT}; }}
 
     QComboBox {{
         background: {SURFACE_CONTAINER_HIGH};

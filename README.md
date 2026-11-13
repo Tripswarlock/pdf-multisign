@@ -6,7 +6,7 @@
 
 Поддерживаются Windows 10/11 x64 и Linux x64 (проверено на Astra Linux 1.8.6).
 
-![Интерфейс](docs/screenshot-signed.png)
+![Интерфейс](docs/screenshot-main.png)
 
 ## Скачать
 
