@@ -2,7 +2,8 @@ PDF Мультиподпись 1.0.0 — подпись PDF нескольким
 
 ## Что в релизе
 
-- `PDF-Multisign.exe` (71 МБ) — portable-сборка для Windows 10/11 x64. Python устанавливать не нужно.
+- `PDF-Multisign-1.0.0-win64.msi` (71 МБ) — установщик для Windows 10/11 x64: мастер установки, ярлык в меню «Пуск», запись в «Приложения и возможности», ссылка на репозиторий в свойствах.
+- `PDF-Multisign.exe` (71 МБ) — portable-сборка для Windows. Python устанавливать не нужно.
 - `pdf-multisign_1.0.0_amd64.deb` (106 МБ) — пакет для Debian 12 / Astra Linux 1.8 / Ubuntu 22.04+.
 
 ## Возможности
@@ -13,7 +14,7 @@ PDF Мультиподпись 1.0.0 — подпись PDF нескольким
 - каждая подпись — отдельная инкрементальная ревизия PDF, документ можно доподписывать;
 - проверка подписи: CryptoPro CSP + независимый ГОСТ-хеш (Streebog-256);
 - интерфейс PySide6 в стиле Material Design, тёмно-синий акцент;
-- «О программе» с версией, компонентами и состоянием CryptoPro.
+- «О программе»: версия, автор, ссылка на репозиторий, компоненты и состояние CryptoPro.
 
 ## Требования
 
@@ -22,7 +23,7 @@ PDF Мультиподпись 1.0.0 — подпись PDF нескольким
 
 ## Установка
 
-Windows: распакуйте и запустите `PDF-Multisign.exe`.
+Windows: запустите `PDF-Multisign-1.0.0-win64.msi` (или распакуйте portable exe).
 
 Linux:
 ```bash
@@ -34,13 +35,15 @@ pdf-multisign
 ## Проверено
 
 - Windows 11 x64 + CryptoPro CSP 5.0, GOST R 34.10-2012: две подписи в одном PDF, обе проверены (VerifyCades + Streebog-256), PDFium видит 2 подписи;
+- MSI проверен административной установкой `msiexec /a`: файлы, каталог установки и свойства пакета формируются корректно;
 - Astra Linux 1.8.6 в VirtualBox + CryptoPro CSP 5.0.13000: `.deb` установлен, интерфейс запускается, `cryptcp`/`certmgr` найдены, CMS с Windows проверяется на Linux (изменённый документ отклоняется).
 
 ## Контрольные суммы
 
 ```
-SHA256  PDF-Multisign.exe                 57a8b78da2154f8db796fa8bb2a788f7fb36b89c4eae9feb5a765bde6cac7319
-SHA256  pdf-multisign_1.0.0_amd64.deb     283a74e07bf8dcad753ca253dc4e6fef2d260c0bfb00f444dd4b638bca82f5fb
+SHA256  PDF-Multisign-1.0.0-win64.msi   c11347e9bdbef077a38fc7a159170d4f80e10b05a1907ad1e28e15714e802b69
+SHA256  PDF-Multisign.exe               0d766a73c44ebf322975c3a06d674f1e70a1dec95b256a857f6be25664759ef3
+SHA256  pdf-multisign_1.0.0_amd64.deb   2df2e2edd5ac25f1155816d8d4134d96684a5d026971f196131b87fb80855e3d
 ```
 
 ## Ограничения
@@ -49,4 +52,4 @@ SHA256  pdf-multisign_1.0.0_amd64.deb     283a74e07bf8dcad753ca253dc4e6fef2d260c
 - цепочка доверия и отзыв (CRL/OCSP) не оцениваются, метка времени не ставится — офлайн-профиль;
 - юридическая значимость зависит от CryptoPro CSP, сертификата и удостоверяющего центра.
 
-Лицензия кода — MIT. Полное описание: [README](https://github.com/Tripswarlock/pdf-multisign#readme).
+Лицензия кода — MIT. Полное описание и исходники: [репозиторий](https://github.com/Tripswarlock/pdf-multisign#readme).
