@@ -41,9 +41,9 @@ pdf-multisign
 ## Контрольные суммы
 
 ```
-SHA256  PDF-Multisign-1.0.0-win64.msi   c11347e9bdbef077a38fc7a159170d4f80e10b05a1907ad1e28e15714e802b69
-SHA256  PDF-Multisign.exe               0d766a73c44ebf322975c3a06d674f1e70a1dec95b256a857f6be25664759ef3
-SHA256  pdf-multisign_1.0.0_amd64.deb   2df2e2edd5ac25f1155816d8d4134d96684a5d026971f196131b87fb80855e3d
+SHA256  PDF-Multisign-1.0.0-win64.msi   e096d6290e6a9168a65e85fc4e5ade5987d4aafe53cfe0027d03e29500be2106
+SHA256  PDF-Multisign.exe               3326d425d5f9700defa44c3e6b006b6a107433a80b7093c8c85c7e9084b5fd1d
+SHA256  pdf-multisign_1.0.0_amd64.deb   e25c6ed4853994577fa425d2a378f7d4ba40e6740fdceef046b2122915375e81
 ```
 
 ## Ограничения
@@ -53,3 +53,4 @@ SHA256  pdf-multisign_1.0.0_amd64.deb   2df2e2edd5ac25f1155816d8d4134d96684a5d02
 - юридическая значимость зависит от CryptoPro CSP, сертификата и удостоверяющего центра.
 
 Лицензия кода — MIT. Полное описание и исходники: [репозиторий](https://github.com/Tripswarlock/pdf-multisign#readme).
+
