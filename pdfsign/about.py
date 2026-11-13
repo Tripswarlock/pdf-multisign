@@ -20,6 +20,7 @@ from . import crypto
 APP_NAME = "PDF Мультиподпись"
 AUTHOR = "Петровский Дмитрий"
 AUTHOR_EMAIL = "tripswarlock@gmail.com"
+PROJECT_URL = "https://github.com/Tripswarlock/pdf-multisign"
 
 
 def _components_html() -> str:
@@ -81,7 +82,8 @@ def build_about_html() -> str:
     <h3 style="margin-bottom:4px;">Автор</h3>
     <p style="margin-top:0;">
         <b>{AUTHOR}</b><br>
-        Email: <a href="mailto:{AUTHOR_EMAIL}">{AUTHOR_EMAIL}</a>
+        Email: <a href="mailto:{AUTHOR_EMAIL}">{AUTHOR_EMAIL}</a><br>
+        GitHub: <a href="{PROJECT_URL}">{PROJECT_URL}</a>
     </p>
 
     <h3 style="margin-bottom:4px;">Что делает программа</h3>

@@ -12,6 +12,7 @@
 
 Готовые сборки — в [GitHub Releases](https://github.com/Tripswarlock/pdf-multisign/releases):
 
+- `PDF-Multisign-1.0.0-win64.msi` — установщик для Windows (мастер, ярлык в меню, запись в «Приложения»);
 - `PDF-Multisign.exe` — portable-сборка для Windows (один файл, Python не нужен);
 - `pdf-multisign_1.0.0_amd64.deb` — пакет для Debian/Astra/Ubuntu.
 
@@ -21,7 +22,10 @@
 
 1. Установите **CryptoPro CSP 5.0 R2+** с компонентом CAdES Browser Plug-in.
 2. Установите сертификат в `CurrentUser\My`, проверьте: `certutil -user -store My`.
-3. Запустите `PDF-Multisign.exe` — установка не требуется.
+3. Установите программу:
+   - `PDF-Multisign-1.0.0-win64.msi` — обычный установщик, ставит в
+     `Program Files\PDF Мультиподпись` и создаёт ярлык в меню «Пуск»;
+   - либо запустите `PDF-Multisign.exe` без установки.
 
 ### Linux (Astra 1.8, Debian 12, Ubuntu 22.04+)
 
@@ -168,10 +172,16 @@ python tests\check_structure.py
 # Windows exe (PyInstaller, ~71 МБ, один файл)
 powershell -ExecutionPolicy Bypass -File packaging\windows\build_exe.ps1
 
+# Windows MSI (WiX Toolset 3.14, ~71 МБ)
+powershell -ExecutionPolicy Bypass -File packaging\windows\build_msi.ps1
+
 # Linux .deb (собирается и на Windows, и на Linux)
 python packaging\fetch_linux_vendor.py
 python packaging\linux\build_deb.py --version 1.0.0 --out dist
 ```
+
+Для MSI нужен WiX 3.14 в `tools\wix` (`wix314-binaries.zip`), для exe —
+PyInstaller в `tools\pyinstaller` (скачивается скриптом автоматически).
 
 ## Структура
 
@@ -188,7 +198,8 @@ pdfsign/
   appearance.py   видимый блок подписи (векторные контуры)
   service.py      сценарий «несколько подписей за один проход»
 packaging/
-  windows/        entry.py, build_exe.ps1, fetch_build_tools.py
+  windows/        entry.py, build_exe.ps1, installer.wxs, build_msi.ps1,
+                  license.rtf, fetch_build_tools.py
   linux/          build_deb.py, guest_*.ps1 (тесты на VM), astra_install_test.sh
   make_icon.py    иконка приложения
 tests/

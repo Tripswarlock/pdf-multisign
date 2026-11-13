@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*"
+           Name="PDF Мультиподпись"
+           Language="1049"
+           Version="1.0.0"
+           Manufacturer="Петровский Дмитрий"
+           UpgradeCode="{B7A3F1E2-5C41-4A6E-9B7D-2E8C4F1A6D93}">
+
+    <Package InstallerVersion="500"
+             Compressed="yes"
+             InstallScope="perMachine"
+             Platform="x64"
+             Description="Подпись PDF несколькими подписями CryptoPro CSP"
+             Comments="https://github.com/Tripswarlock/pdf-multisign" />
+
+    <MajorUpgrade DowngradeErrorMessage="Установлена более новая версия PDF Мультиподпись. Удалите её перед установкой этой версии." />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <Icon Id="AppIcon" SourceFile="..\..\resources\pdf-multisign.ico" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/Tripswarlock/pdf-multisign" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/Tripswarlock/pdf-multisign" />
+    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLFOLDER" Name="PDF Мультиподпись" />
+      </Directory>
+      <Directory Id="ProgramMenuFolder">
+        <Directory Id="ApplicationProgramsFolder" Name="PDF Мультиподпись" />
+      </Directory>
+    </Directory>
+
+    <DirectoryRef Id="INSTALLFOLDER">
+      <Component Id="MainExecutable" Guid="{4C6E1B52-8A3F-4D71-9E2C-5B7A0F3D8E64}">
+        <File Id="PDFMultisignExe"
+              Name="PDF-Multisign.exe"
+              Source="..\..\dist\PDF-Multisign.exe"
+              KeyPath="yes">
+          <Shortcut Id="StartMenuShortcut"
+                    Directory="ApplicationProgramsFolder"
+                    Name="PDF Мультиподпись"
+                    Description="Несколько подписей CryptoPro в одном PDF"
+                    WorkingDirectory="INSTALLFOLDER"
+                    Icon="AppIcon"
+                    Advertise="yes" />
+        </File>
+      </Component>
+
+      <Component Id="ReadmeFile" Guid="{9F2D7A41-3B6C-4E58-8A1D-6C4B2E9F7A35}">
+        <File Id="ReadmeTxt"
+              Name="README.md"
+              Source="..\..\README.md"
+              KeyPath="yes" />
+      </Component>
+
+      <Component Id="LicenseFile" Guid="{2A8E5C71-4D9B-4F63-9C7E-1B5D8A3F6C29}">
+        <File Id="LicenseTxt"
+              Name="LICENSE"
+              Source="..\..\LICENSE"
+              KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <DirectoryRef Id="ApplicationProgramsFolder">
+      <Component Id="ApplicationShortcut" Guid="{6D1F9B24-7E53-4A8C-9B2F-3C8E5A1D7F46}">
+        <RemoveFolder Id="RemoveApplicationProgramsFolder" On="uninstall" />
+        <RegistryValue Root="HKCU"
+                       Key="Software\Tripswarlock\PDFMultisign"
+                       Name="StartMenuShortcut"
+                       Type="integer"
+                       Value="1"
+                       KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <Feature Id="MainFeature" Title="PDF Мультиподпись" Level="1" Absent="disallow">
+      <ComponentRef Id="MainExecutable" />
+      <ComponentRef Id="ReadmeFile" />
+      <ComponentRef Id="LicenseFile" />
+      <ComponentRef Id="ApplicationShortcut" />
+    </Feature>
+
+    <UIRef Id="WixUI_InstallDir" />
+    <WixVariable Id="WixUILicenseRtf" Value="license.rtf" />
+  </Product>
+</Wix>
