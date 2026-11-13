@@ -1,0 +1,29 @@
+# Зависимости и артефакты сборки
+/vendor/
+/vendor-linux/
+/wheels/
+/tools/
+/dist/
+/build/
+/.tmp/
+/pip-*/
+/mktest-*/
+*.pyc
+__pycache__/
+*.pyo
+*.pyd
+.venv/
+venv/
+
+# Тестовые артефакты
+/out-*.pdf
+/demo-two-signatures.pdf
+/debug/
+
+# ОС и редакторы
+Thumbs.db
+desktop.ini
+.DS_Store
+.idea/
+.vscode/
+*.swp

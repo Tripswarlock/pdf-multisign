@@ -1,0 +1,258 @@
+"""CryptoPro CSP on Linux through the official CLI (cryptcp / certmgr).
+
+Mirrors the approach of the reference project: signing and verification are
+delegated to CryptoPro's own command line tools, the PIN is passed on stdin (not
+in the command line), and no private key material is read.
+"""
+from __future__ import annotations
+
+import datetime as dt
+import os
+import re
+import shutil
+import subprocess
+import tempfile
+
+from .crypto import CertificateInfo, CryptoError, cms_message_digest, parse_dn, streebog256
+
+CRYPTOPRO_ROOTS = ("/opt/cprocsp/bin/amd64", "/opt/cprocsp/bin/aarch64", "/opt/cprocsp/bin")
+
+_PEM_RE = re.compile(
+    r"-----BEGIN CERTIFICATE-----(.+?)-----END CERTIFICATE-----", re.DOTALL
+)
+
+
+def _find_tool(name: str) -> str:
+    for root in CRYPTOPRO_ROOTS:
+        candidate = os.path.join(root, name)
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return shutil.which(name) or ""
+
+
+def cryptcp_path() -> str:
+    return _find_tool("cryptcp")
+
+
+def certmgr_path() -> str:
+    return _find_tool("certmgr")
+
+
+def available() -> bool:
+    return bool(cryptcp_path() or certmgr_path())
+
+
+def status() -> tuple[bool, str]:
+    cp = cryptcp_path()
+    cm = certmgr_path()
+    if not cp and not cm:
+        return False, (
+            "CryptoPro CSP для Linux не найден: нет /opt/cprocsp/bin/*/cryptcp и certmgr. "
+            "Установите CryptoPro CSP и пакет cprocsp-cptools."
+        )
+    parts = []
+    if cp:
+        parts.append(f"cryptcp: {cp}")
+    if cm:
+        parts.append(f"certmgr: {cm}")
+    return True, "CryptoPro CSP доступен (" + "; ".join(parts) + ")"
+
+
+def _run(args: list[str], stdin_data: bytes | None = None, timeout: int = 120):
+    try:
+        process = subprocess.run(
+            args,
+            input=stdin_data,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=timeout,
+        )
+        return process.returncode, process.stdout.decode("utf-8", "replace")
+    except subprocess.TimeoutExpired:
+        return 124, "Таймаут операции CryptoPro"
+    except OSError as exc:
+        return 127, f"Не удалось запустить {args[0]}: {exc}"
+
+
+def list_certificates() -> list[CertificateInfo]:
+    tool = certmgr_path()
+    if not tool:
+        raise CryptoError(
+            "certmgr из CryptoPro CSP не найден — список сертификатов недоступен",
+            "CRYPTOPRO_UNAVAILABLE",
+        )
+    code, output = _run([tool, "-list", "-store", "uMy"], timeout=60)
+    if "Список сертификатов пуст" in output or "Требуемый сертификат не существует" in output:
+        return []
+    if code not in (0, 1):
+        raise CryptoError(
+            "certmgr завершился с ошибкой: " + output.strip().splitlines()[0][:160],
+            "CERTMGR_ERROR",
+        )
+
+    certificates: list[CertificateInfo] = []
+    for block in re.split(r"\n-{2,}\s*\n|\n\d+-{3,}", output):
+        if "Subject" not in block:
+            continue
+        info = CertificateInfo()
+        info.subject = _field(block, "Subject")
+        info.issuer = _field(block, "Issuer")
+        info.serial = _field(block, "Serial")
+        thumb = _field(block, "SHA1 Thumbprint")
+        info.thumbprint = thumb.replace(" ", "").replace(":", "").upper()
+        container = _field(block, "Container")
+        info.container_name = container
+        provider = _field(block, "Provider Name")
+        info.is_crypto_pro = "crypto-pro" in provider.lower() or "crypto pro" in provider.lower()
+        info.is_gost = "34.10" in provider or "gost" in provider.lower()
+        link = _field(block, "PrivateKey Link")
+        info.has_private_key = link.lower().startswith("yes") or bool(container)
+        if not thumb:
+            continue
+        info.sign_capable = info.has_private_key and info.is_crypto_pro and info.is_gost
+        if info.has_private_key and not info.is_crypto_pro:
+            info.signing_note = "Ключ вне CryptoPro CSP — подпись недоступна"
+
+        dn = parse_dn(info.subject)
+        info.common_name = dn.get("common_name", "")
+        info.surname = dn.get("surname", "")
+        info.given_name = dn.get("given_name", "")
+        info.organization = dn.get("organization", "")
+        info.organizational_unit = dn.get("organizational_unit", "")
+        info.position = dn.get("position", "")
+        info.inn = dn.get("inn", "")
+        info.snils = dn.get("snils", "")
+        info.email = dn.get("email", "")
+        not_before, not_after = _validity(block)
+        info.not_before = not_before
+        info.not_after = not_after
+        certificates.append(info)
+
+    certificates.sort(
+        key=lambda item: (
+            not item.sign_capable,
+            not item.is_valid_now,
+            -(item.not_after.timestamp() if item.not_after else 0),
+        )
+    )
+    return certificates
+
+
+def _field(block: str, name: str) -> str:
+    match = re.search(rf"{re.escape(name)}\s*:\s*(.+)", block)
+    return match.group(1).strip() if match else ""
+
+
+def _validity(block: str) -> tuple[dt.datetime | None, dt.datetime | None]:
+    def parse(label: str) -> dt.datetime | None:
+        raw = _field(block, label)
+        for fmt in ("%m/%d/%Y %H:%M:%S UTC", "%d.%m.%Y %H:%M:%S", "%d.%m.%Y", "%Y-%m-%d %H:%M:%S"):
+            try:
+                return dt.datetime.strptime(raw, fmt)
+            except ValueError:
+                continue
+        return None
+
+    return parse("Not valid before"), parse("Not valid after")
+
+
+def sign_detached(
+    content: bytes,
+    thumbprint: str,
+    *,
+    pin: str | None = None,
+    check_chain: bool = False,
+    tsa_url: str | None = None,
+) -> bytes:
+    tool = cryptcp_path()
+    if not tool:
+        raise CryptoError(
+            "cryptcp из CryptoPro CSP не найден — подпись недоступна", "CRYPTOPRO_UNAVAILABLE"
+        )
+    if not content:
+        raise CryptoError("Пустые данные для подписи", "EMPTY_CONTENT")
+    if not thumbprint.strip():
+        raise CryptoError("Сертификат для подписи не выбран", "CERTIFICATE_REQUIRED")
+    if tsa_url:
+        # cryptcp supports -t but the offline profile deliberately ignores TSA.
+        pass
+
+    with tempfile.TemporaryDirectory(prefix="pdfmultisign-") as directory:
+        input_path = os.path.join(directory, "input.bin")
+        signature_path = os.path.join(directory, "signature.sig")
+        with open(input_path, "wb") as handle:
+            handle.write(content)
+        args = [
+            tool,
+            "-sign",
+            "-detach",
+            "-thumbprint",
+            thumbprint.replace(" ", ""),
+            "-der",
+            input_path,
+            signature_path,
+        ]
+        stdin_data = (pin.encode() + b"\n") if pin else None
+        code, output = _run(args, stdin_data=stdin_data, timeout=180)
+        signature = b""
+        if os.path.exists(signature_path):
+            with open(signature_path, "rb") as handle:
+                signature = handle.read()
+        if code != 0 or not signature:
+            raise CryptoError(
+                "cryptcp не создал подпись. Проверьте PIN и подключение токена. "
+                f"Ответ CryptoPro: {output.strip()[:200]}",
+                "SIGNING_FAILED",
+            )
+        _assert_digest(signature, content)
+        return signature
+
+
+def _assert_digest(cms: bytes, content: bytes) -> None:
+    expected = cms_message_digest(cms)
+    actual = streebog256(content)
+    if expected is None or actual is None:
+        return
+    if expected != actual:
+        raise CryptoError(
+            "cryptcp подписал не байты документа (несовпадение ГОСТ-хеша). "
+            "Проверьте параметры cryptcp -der / -detach.",
+            "CMS_DIGEST_MISMATCH",
+        )
+
+
+def verify_detached(cms: bytes, content: bytes) -> tuple[bool, str]:
+    tool = cryptcp_path()
+    digest_ok = False
+    expected = cms_message_digest(cms)
+    actual = streebog256(content)
+    if expected is not None and actual is not None:
+        digest_ok = expected == actual
+
+    if not tool:
+        if expected is not None and actual is not None:
+            return digest_ok, (
+                "ГОСТ-хеш документа совпадает с подписанным"
+                if digest_ok
+                else "ГОСТ-хеш документа НЕ совпадает с подписанным"
+            )
+        return False, "cryptcp не найден — проверка подписи недоступна"
+
+    with tempfile.TemporaryDirectory(prefix="pdfmultisign-verify-") as directory:
+        input_path = os.path.join(directory, "input.bin")
+        signature_path = os.path.join(directory, "signature.sig")
+        with open(input_path, "wb") as handle:
+            handle.write(content)
+        with open(signature_path, "wb") as handle:
+            handle.write(cms)
+        code, output = _run(
+            [tool, "-verify", "-detach", signature_path, input_path], timeout=120
+        )
+        if code == 0:
+            return True, "Подпись верна (проверено cryptcp CryptoPro CSP)"
+        if digest_ok:
+            return True, (
+                "ГОСТ-хеш документа совпадает с подписанным; "
+                f"cryptcp недоступен для полной проверки: {output.strip()[:120]}"
+            )
+        return False, f"cryptcp: {output.strip()[:200]}"
