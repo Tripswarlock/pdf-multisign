@@ -31,6 +31,9 @@ REGIONS: dict[str, list[tuple[int, int, int, int]]] = {
     "session-join.png": [
         (48, 308, 710, 448),      # certificate rows (name, org, validity)
     ],
+    "astra-ui.png": [
+        (728, 168, 1172, 235),    # certificate row on Astra
+    ],
     "signature-block.png": [
         (883, 608, 1172, 890),    # both visible signature stamps on the page
     ],

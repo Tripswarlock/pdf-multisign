@@ -64,6 +64,13 @@ def status() -> tuple[bool, str]:
 
 
 def _run(args: list[str], stdin_data: bytes | None = None, timeout: int = 120):
+    # CryptoPro tools are localized: on a Russian Astra they print «Субъект»,
+    # «Издатель», «SHA1 отпечаток», which the parser cannot read.  A fixed C
+    # locale gives stable English field names (the DN values stay as they are).
+    env = os.environ.copy()
+    env["LC_ALL"] = "C"
+    env["LANG"] = "C"
+    env["LANGUAGE"] = "C"
     try:
         process = subprocess.run(
             args,
@@ -71,6 +78,7 @@ def _run(args: list[str], stdin_data: bytes | None = None, timeout: int = 120):
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             timeout=timeout,
+            env=env,
         )
         return process.returncode, process.stdout.decode("utf-8", "replace")
     except subprocess.TimeoutExpired:
@@ -80,24 +88,33 @@ def _run(args: list[str], stdin_data: bytes | None = None, timeout: int = 120):
 
 
 def _parse_certmgr(output: str) -> list[CertificateInfo]:
-    """Parse ``certmgr -list`` output into certificate descriptors."""
+    """Parse ``certmgr -list`` output into certificate descriptors.
+
+    Both the English (C locale) and Russian (system locale) field names are
+    accepted, so the parser works even if CryptoPro ignores LC_ALL.
+    """
     certificates: list[CertificateInfo] = []
     for block in re.split(r"\n-{2,}\s*\n|\n\d+-{3,}", output):
-        if "Subject" not in block:
+        subject = _field_any(block, "Subject", "Субъект")
+        if not subject:
             continue
         info = CertificateInfo()
-        info.subject = _field(block, "Subject")
-        info.issuer = _field(block, "Issuer")
-        info.serial = _field(block, "Serial")
-        thumb = _field(block, "SHA1 Thumbprint")
+        info.subject = subject
+        info.issuer = _field_any(block, "Issuer", "Издатель")
+        info.serial = _field_any(block, "Serial", "Серийный номер")
+        thumb = _field_any(
+            block, "SHA1 Thumbprint", "SHA1 отпечаток", "Отпечаток SHA1"
+        )
         info.thumbprint = thumb.replace(" ", "").replace(":", "").upper()
-        container = _field(block, "Container")
+        container = _field_any(block, "Container", "Контейнер")
         info.container_name = container
-        provider = _field(block, "Provider Name")
+        provider = _field_any(block, "Provider Name", "Имя провайдера")
         info.is_crypto_pro = "crypto-pro" in provider.lower() or "crypto pro" in provider.lower()
         info.is_gost = "34.10" in provider or "gost" in provider.lower()
-        link = _field(block, "PrivateKey Link")
-        info.has_private_key = link.lower().startswith("yes") or bool(container)
+        link = _field_any(block, "PrivateKey Link", "Ссылка на ключ")
+        info.has_private_key = (
+            link.lower().startswith(("yes", "есть")) or bool(container)
+        )
         if not thumb:
             continue
         info.sign_capable = info.has_private_key and info.is_crypto_pro and info.is_gost
@@ -221,17 +238,38 @@ def _field(block: str, name: str) -> str:
     return match.group(1).strip() if match else ""
 
 
+def _field_any(block: str, *names: str) -> str:
+    """First non-empty field among English/Russian aliases."""
+    for name in names:
+        value = _field(block, name)
+        if value:
+            return value
+    return ""
+
+
 def _validity(block: str) -> tuple[dt.datetime | None, dt.datetime | None]:
-    def parse(label: str) -> dt.datetime | None:
-        raw = _field(block, label)
-        for fmt in ("%m/%d/%Y %H:%M:%S UTC", "%d.%m.%Y %H:%M:%S", "%d.%m.%Y", "%Y-%m-%d %H:%M:%S"):
+    def parse(label: str, *aliases: str) -> dt.datetime | None:
+        raw = _field_any(block, label, *aliases)
+        for fmt in (
+            # CryptoPro prints dates as dd/mm/yyyy in both C and Russian locales
+            "%d/%m/%Y %H:%M:%S UTC",
+            "%d/%m/%Y %H:%M:%S",
+            "%d/%m/%Y",
+            "%d.%m.%Y %H:%M:%S",
+            "%d.%m.%Y",
+            "%Y-%m-%d %H:%M:%S",
+            "%m/%d/%Y %H:%M:%S UTC",
+        ):
             try:
                 return dt.datetime.strptime(raw, fmt)
             except ValueError:
                 continue
         return None
 
-    return parse("Not valid before"), parse("Not valid after")
+    return (
+        parse("Not valid before", "Выдан", "Действителен с"),
+        parse("Not valid after", "Истекает", "Действителен до"),
+    )
 
 
 def sign_detached(
