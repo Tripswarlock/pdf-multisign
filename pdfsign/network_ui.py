@@ -197,7 +197,17 @@ class HostSetupDialog(QDialog):
         card, card_layout = _card("Схема подписания")
         _shadow(card)
 
-        self._sequential = QRadioButton("Последовательная подпись (Рекомендуется)")
+        self._parallel = QRadioButton("Параллельная подпись")
+        card_layout.addWidget(self._parallel)
+        par_hint = QLabel(
+            "Каждый участник независимо подписывает исходный файл. Итог — "
+            "исходный PDF и отдельные файлы .sig для каждого подписанта."
+        )
+        par_hint.setObjectName("Caption")
+        par_hint.setWordWrap(True)
+        card_layout.addWidget(par_hint)
+
+        self._sequential = QRadioButton("Последовательная подпись")
         self._sequential.setChecked(True)
         card_layout.addWidget(self._sequential)
         seq_hint = QLabel(
@@ -233,16 +243,6 @@ class HostSetupDialog(QDialog):
         page_row.addWidget(self._page_combo, 1)
         sub_layout.addLayout(page_row)
         card_layout.addWidget(sub)
-
-        self._parallel = QRadioButton("Параллельная подпись (соподпись)")
-        card_layout.addWidget(self._parallel)
-        par_hint = QLabel(
-            "Каждый участник независимо подписывает исходный файл. Итог — "
-            "исходный PDF и отдельные файлы .sig для каждого подписанта."
-        )
-        par_hint.setObjectName("Caption")
-        par_hint.setWordWrap(True)
-        card_layout.addWidget(par_hint)
 
         layout.addWidget(card)
 

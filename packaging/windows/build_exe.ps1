@@ -27,7 +27,7 @@ $env:PATH = (Join-Path $vendor "pywin32_system32") + ";" + $env:PATH
 $env:PYTHONIOENCODING = "utf-8"
 
 $icon = Join-Path $root "resources\pdf-multisign.ico"
-$png = Join-Path $root "resources\pdf-multisign.png"
+$resources = Join-Path $root "resources"
 $buildRoot = Join-Path $root "build\pyinstaller"
 $target = Join-Path $root (Join-Path $OutDir "PDF-Multisign.exe")
 
@@ -35,7 +35,7 @@ python -m PyInstaller `
     --noconfirm --clean --onefile --windowed `
     --name "PDF-Multisign" `
     --icon $icon `
-    --add-data "$png;resources" `
+    --add-data "$resources;resources" `
     --collect-submodules win32com `
     --collect-submodules pythoncom `
     --hidden-import PySide6.QtSvg `

@@ -24,6 +24,11 @@ def _asset(name: str) -> str:
 
 ARROW_DOWN = _asset("chevron-down.png")
 ARROW_DOWN_DISABLED = _asset("chevron-down-disabled.png")
+RADIO_OFF = _asset("radio-off.png")
+RADIO_OFF_HOVER = _asset("radio-off-hover.png")
+RADIO_ON = _asset("radio-on.png")
+RADIO_OFF_DISABLED = _asset("radio-off-disabled.png")
+RADIO_ON_DISABLED = _asset("radio-on-disabled.png")
 
 PRIMARY = "#1D4ED8"
 ON_PRIMARY = "#FFFFFF"
@@ -41,6 +46,50 @@ OUTLINE = "#64748B"
 OUTLINE_VARIANT = "#C3D0E4"
 ERROR = "#B3261E"
 SUCCESS = "#146C2E"
+
+
+def _radio_rules() -> str:
+    """Round radio indicators drawn from PNG assets, with a CSS-only fallback.
+
+    If the asset cannot be resolved (broken bundle, unusual install layout) the
+    stylesheet falls back to a border-based circle so the indicator is never
+    invisible.
+    """
+    if RADIO_OFF and RADIO_ON:
+        disabled_off = RADIO_OFF_DISABLED or RADIO_OFF
+        disabled_on = RADIO_ON_DISABLED or RADIO_ON
+        hover = RADIO_OFF_HOVER or RADIO_OFF
+        return f"""
+    QRadioButton {{ spacing: 10px; font-weight: 600; }}
+    QRadioButton::indicator {{
+        width: 20px; height: 20px;
+        border: none;
+        background: transparent;
+        image: url("{RADIO_OFF}");
+    }}
+    QRadioButton::indicator:hover {{ image: url("{hover}"); }}
+    QRadioButton::indicator:checked {{ image: url("{RADIO_ON}"); }}
+    QRadioButton:disabled {{ color: {OUTLINE}; }}
+    QRadioButton::indicator:disabled {{ image: url("{disabled_off}"); }}
+    QRadioButton::indicator:checked:disabled {{ image: url("{disabled_on}"); }}
+    """
+    return f"""
+    QRadioButton {{ spacing: 10px; font-weight: 600; }}
+    QRadioButton::indicator {{
+        width: 18px; height: 18px;
+        border: 2px solid {ON_SURFACE_VARIANT};
+        border-radius: 11px;
+        background: transparent;
+    }}
+    QRadioButton::indicator:hover {{ border-color: {PRIMARY}; }}
+    QRadioButton::indicator:checked {{
+        border: 6px solid {PRIMARY};
+        background: {SURFACE};
+    }}
+    QRadioButton:disabled {{ color: {OUTLINE}; }}
+    QRadioButton::indicator:disabled {{ border-color: {OUTLINE_VARIANT}; }}
+    QRadioButton::indicator:checked:disabled {{ border: 6px solid {OUTLINE_VARIANT}; }}
+    """
 
 
 def stylesheet() -> str:
@@ -198,22 +247,7 @@ def stylesheet() -> str:
     QCheckBox:disabled {{ color: {OUTLINE}; }}
     QCheckBox::indicator:disabled {{ border-color: {OUTLINE_VARIANT}; }}
 
-    QRadioButton {{ spacing: 10px; font-weight: 600; }}
-    QRadioButton::indicator {{
-        width: 20px; height: 20px;
-        border: 2px solid {ON_SURFACE_VARIANT};
-        border-radius: 12px;
-        background: transparent;
-    }}
-    QRadioButton::indicator:hover {{ border-color: {PRIMARY}; }}
-    QRadioButton::indicator:checked {{
-        border: 6px solid {PRIMARY};
-        background: {SURFACE};
-    }}
-    QRadioButton:disabled {{ color: {OUTLINE}; }}
-    QRadioButton::indicator:disabled {{ border-color: {OUTLINE_VARIANT}; }}
-    QRadioButton::indicator:checked:disabled {{ border: 6px solid {OUTLINE_VARIANT}; }}
-
+    {_radio_rules()}
     QProgressBar {{
         background: {SURFACE_VARIANT};
         border: none;
