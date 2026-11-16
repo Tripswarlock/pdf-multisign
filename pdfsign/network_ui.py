@@ -569,6 +569,7 @@ class HostSessionDialog(QDialog):
         self._host_worker: ClientSignWorker | None = None
         self._host_signed = False
         self._known_names: dict[str, str] = {}
+        self._download_available = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(22, 20, 22, 18)
@@ -722,18 +723,25 @@ class HostSessionDialog(QDialog):
         self._abort.setStyleSheet(f"QPushButton {{ color: {theme.ERROR}; }}")
         self._abort.clicked.connect(self._abort_session)
         buttons.addWidget(self._abort)
+        self._download = QPushButton("Скачать архив")
+        self._download.setObjectName("Text")
+        self._download.setEnabled(False)
+        self._download.setToolTip("Пока никто не подписал — скачивать нечего")
+        self._download.clicked.connect(self._download_archive)
+        buttons.addWidget(self._download)
         buttons.addStretch(1)
+        self._finish = QPushButton("Завершить и сохранить")
+        self._finish.setObjectName("Tonal")
+        self._finish.setToolTip("Завершить сессию и сохранить итоговый файл")
+        self._finish.clicked.connect(self._finish_session)
+        buttons.addWidget(self._finish)
         self._sign = QPushButton("Подписать документ")
-        self._sign.setObjectName("Tonal")
+        self._sign.setObjectName("Filled")
         self._sign.setToolTip(
             "Подписать документ своим сертификатом как организатор"
         )
         self._sign.clicked.connect(self._sign_as_host)
         buttons.addWidget(self._sign)
-        self._finish = QPushButton("Завершить и сохранить")
-        self._finish.setObjectName("Filled")
-        self._finish.clicked.connect(self._finish_session)
-        buttons.addWidget(self._finish)
         layout.addLayout(buttons)
 
         self._copy_timer = QTimer(self)
@@ -778,6 +786,7 @@ class HostSessionDialog(QDialog):
         if self._host_signed:
             self._certs.setEnabled(False)
             self._refresh_certs.setEnabled(False)
+        self._update_download_state(snap)
         self._update_sign_button(snap)
 
     def _set_host_status(self) -> None:
@@ -892,6 +901,78 @@ class HostSessionDialog(QDialog):
         self._log.setText(text)
         self._log.setToolTip(text)
         self._log.setVisible(True)
+
+    # ---------------------------------------------------- host: archive copy
+    def _update_download_state(self, snap: dict) -> None:
+        signed = sum(
+            1 for p in snap["participants"] if p["status"] == network.STATUS_SIGNED
+        )
+        if self._session.config.mode != network.MODE_PARALLEL:
+            self._apply_download_style(False)
+            self._download.setToolTip(
+                "В последовательной схеме подписи внутри PDF — "
+                "используйте «Завершить и сохранить»"
+            )
+            return
+        available = signed > 0
+        self._apply_download_style(available)
+        if available:
+            self._download.setToolTip(
+                f"Скачать {self._session.archive_name()} — подписей: {signed}"
+            )
+        else:
+            self._download.setToolTip("Пока никто не подписал — скачивать нечего")
+
+    def _apply_download_style(self, available: bool) -> None:
+        if self._download_available == available:
+            return
+        self._download_available = available
+        self._download.setObjectName("Outline" if available else "Text")
+        self._download.setEnabled(available)
+        style = self._download.style()
+        style.unpolish(self._download)
+        style.polish(self._download)
+        self._download.update()
+
+    def _download_archive(self) -> None:
+        if self._session.config.mode != network.MODE_PARALLEL:
+            return
+        snap = self._session.snapshot()
+        signed = sum(
+            1 for p in snap["participants"] if p["status"] == network.STATUS_SIGNED
+        )
+        if signed == 0:
+            QMessageBox.warning(self, "Архив", "Пока никто не подписал документ.")
+            return
+        try:
+            archive = self._session.package_zip()
+        except Exception as exc:  # pragma: no cover - defensive
+            QMessageBox.critical(self, "Архив", f"Не удалось собрать архив: {exc}")
+            return
+        default = str(
+            pathlib.Path(snap["doc_name"]).with_name(self._session.archive_name())
+        )
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Сохранить архив с подписями", default, "ZIP (*.zip)"
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".zip"):
+            path += ".zip"
+        try:
+            pathlib.Path(path).write_bytes(archive)
+        except OSError as exc:
+            QMessageBox.critical(self, "Сохранение", f"Не удалось сохранить архив: {exc}")
+            return
+        self._log_message("Архив с подписями сохранён")
+        QMessageBox.information(
+            self,
+            "Готово",
+            f"Архив сохранён:\n{path}\n\n"
+            f"Внутри: {snap['doc_name']}, {signed} файл(а) подписей .sig"
+            + (", Protokol.pdf" if self._session.config.protocol else "")
+            + ". Сессия продолжается — участники могут подписывать дальше.",
+        )
 
     def _copy_code(self) -> None:
         QApplication.clipboard().setText(self._session.code)
@@ -1342,6 +1423,9 @@ class JoinSessionDialog(QDialog):
 
     # ------------------------------------------------------------ connection
     def _connect_session(self) -> None:
+        if self._client is not None:
+            self._disconnect_session()
+            return
         self._poll_failures = 0
         self._host_lost_notified = False
         self._finished_notified = False
@@ -1376,9 +1460,33 @@ class JoinSessionDialog(QDialog):
         )
         self._session_info.setText(self._session_summary)
         if self._try_join():
-            self._connect.setText("Переподключиться")
             self._set_connection_state("connected")
+            self._on_cert_changed()
             self._timer.start()
+
+    def _disconnect_session(self) -> None:
+        """Stop polling and leave the session (the button «Отключиться»)."""
+        self._timer.stop()
+        worker = self._worker
+        self._worker = None
+        if worker is not None and worker.isRunning():
+            for signal in (worker.progress, worker.done, worker.failed):
+                try:
+                    signal.disconnect()
+                except Exception:
+                    pass
+            worker.terminate()
+            worker.wait(2000)
+        client = self._client
+        if (
+            client is not None
+            and self._joined
+            and not self._signed
+            and not self._declined
+            and not self._finished_notified
+        ):
+            client.leave()
+        self._reset_connection()
 
     def _reset_connection(self) -> None:
         self._client = None
@@ -1387,6 +1495,7 @@ class JoinSessionDialog(QDialog):
         self._declined = False
         self._session_summary = ""
         self._connect.setText("Подключиться")
+        self._table.clear()
         self._set_connection_state("idle")
         self._apply_download_style(False)
         self._download.setToolTip("Пока никто не подписал — скачивать нечего")
@@ -1447,18 +1556,43 @@ class JoinSessionDialog(QDialog):
         self._sign.setEnabled(
             self._joined and usable and not (self._signed or self._declined)
         )
-        self._connect.setEnabled(cert is not None)
-        self._connect.setToolTip(
-            "Подключиться к сессии организатора"
-            if cert is not None
-            else "Сначала выберите сертификат — без него подключиться нельзя"
-        )
+        self._update_connect_button(cert)
         if self._connection_state == "idle":
             self._session_info.setText(
                 "Введите адрес и код, которые сообщил организатор."
                 if cert is not None
                 else "Выберите сертификат ниже — после этого кнопка "
                 "«Подключиться» станет доступной."
+            )
+
+    def _update_connect_button(self, cert) -> None:
+        """«Подключиться» when idle, «Отключиться» when a session is open."""
+        connected = self._client is not None
+        text = "Отключиться" if connected else "Подключиться"
+        if self._connect.text() != text:
+            self._connect.setText(text)
+        style_name = "Tonal" if connected else "Filled"
+        if self._connect.objectName() != style_name:
+            self._connect.setObjectName(style_name)
+            style = self._connect.style()
+            style.unpolish(self._connect)
+            style.polish(self._connect)
+            self._connect.update()
+        busy = self._worker is not None
+        self._connect.setEnabled(
+            not busy
+            and not (self._signed or self._declined)
+            and (connected or cert is not None)
+        )
+        if self._signed or self._declined:
+            self._connect.setToolTip("Подпись уже отправлена — закройте окно")
+        elif connected:
+            self._connect.setToolTip("Отключиться от сессии")
+        elif cert is not None:
+            self._connect.setToolTip("Подключиться к сессии организатора")
+        else:
+            self._connect.setToolTip(
+                "Сначала выберите сертификат — без него подключиться нельзя"
             )
 
     # ---------------------------------------------------------------- signing
@@ -1471,6 +1605,7 @@ class JoinSessionDialog(QDialog):
             return
         self._sign.setEnabled(False)
         self._sign.setText("Подписание…")
+        self._connect.setEnabled(False)
         self._worker = ClientSignWorker(self._client, cert.thumbprint, self._mode)
         self._worker.progress.connect(self._on_progress)
         self._worker.done.connect(self._on_signed)
@@ -1486,6 +1621,7 @@ class JoinSessionDialog(QDialog):
         self._sign.setText("Подписано ✓")
         self._sign.setEnabled(False)
         self._decline.setEnabled(False)
+        self._on_cert_changed()
         QMessageBox.information(
             self, "Готово",
             "Документ подписан. Организатор увидит статус «Подписан», "
@@ -1516,6 +1652,7 @@ class JoinSessionDialog(QDialog):
         self._sign.setEnabled(False)
         self._decline.setEnabled(False)
         self._sign.setText("Отказ от подписи отправлен")
+        self._on_cert_changed()
 
     # ------------------------------------------------------------ package
     def _download_package(self) -> None:
@@ -1661,10 +1798,13 @@ class JoinSessionDialog(QDialog):
                     self._sign.setText("Подписано ✓")
                     self._sign.setEnabled(False)
                     self._decline.setEnabled(False)
+                    self._on_cert_changed()
                 elif item["status"] == network.STATUS_DECLINED:
                     self._declined = True
+                    self._sign.setText("Отказ от подписи отправлен")
                     self._sign.setEnabled(False)
                     self._decline.setEnabled(False)
+                    self._on_cert_changed()
                 elif item["status"] == network.STATUS_ERROR:
                     self._sign.setText("Подписать документ")
                     self._on_cert_changed()
