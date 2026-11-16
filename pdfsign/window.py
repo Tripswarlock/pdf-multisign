@@ -4,7 +4,7 @@ from __future__ import annotations
 import datetime as dt
 import pathlib
 
-from PySide6.QtCore import QSize, Qt, QThread, Signal
+from PySide6.QtCore import QEvent, QSize, Qt, QThread, Signal
 from PySide6.QtGui import QAction, QColor, QIcon, QImage, QPixmap, QTextOption
 from PySide6.QtWidgets import (
     QApplication,
@@ -240,6 +240,14 @@ class MainWindow(QMainWindow):
         self._crypto_badge = QLabel()
         self._crypto_badge.setObjectName("Caption")
         header.addWidget(self._crypto_badge)
+        self._network_button = QPushButton("Сетевая подпись")
+        self._network_button.setObjectName("Tonal")
+        self._network_button.setToolTip(
+            "Несколько компьютеров в локальной сети подписывают один документ "
+            "с отображением статусов"
+        )
+        self._network_button.clicked.connect(self._open_network)
+        header.addWidget(self._network_button)
         self._about_button = QPushButton("О программе")
         self._about_button.setObjectName("Text")
         self._about_button.setToolTip("Автор, компоненты и приватность")
@@ -277,10 +285,12 @@ class MainWindow(QMainWindow):
         self._drop_title = QLabel("Перетащите PDF сюда")
         self._drop_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._drop_title.setStyleSheet("font-weight: 600; background: transparent;")
-        self._drop_hint = QLabel("или выберите файл кнопкой ниже")
+        self._drop_hint = QLabel("или нажмите сюда, чтобы выбрать файл")
         self._drop_hint.setObjectName("Caption")
         self._drop_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._drop_hint.setStyleSheet("background: transparent;")
+        self._drop.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._drop.installEventFilter(self)
         drop_layout.addStretch(1)
         drop_layout.addWidget(self._drop_title)
         drop_layout.addWidget(self._drop_hint)
@@ -372,28 +382,6 @@ class MainWindow(QMainWindow):
         self._reload.clicked.connect(self._load_certificates)
         cert_layout.addWidget(self._reload, 0, Qt.AlignmentFlag.AlignLeft)
 
-        net_card, net_layout = _card("Сетевая подпись (ЛВС)")
-        _shadow(net_card)
-        net_hint = QLabel(
-            "Несколько компьютеров подписывают один документ: здесь создаётся "
-            "сессия, остальные присоединяются по адресу и коду"
-        )
-        net_hint.setObjectName("Caption")
-        net_hint.setWordWrap(True)
-        net_layout.addWidget(net_hint)
-        net_buttons = QHBoxLayout()
-        self._host_button = QPushButton("Создать сессию…")
-        self._host_button.setObjectName("Tonal")
-        self._host_button.setEnabled(False)
-        self._host_button.clicked.connect(self._open_host_session)
-        self._join_button = QPushButton("Присоединиться…")
-        self._join_button.setObjectName("Text")
-        self._join_button.clicked.connect(self._open_join_session)
-        net_buttons.addWidget(self._host_button)
-        net_buttons.addWidget(self._join_button)
-        net_buttons.addStretch(1)
-        net_layout.addLayout(net_buttons)
-
         options_card, opt_layout = _card("Параметры подписи")
         _shadow(options_card)
         self._visible = QCheckBox("Видимый блок подписи на странице")
@@ -449,7 +437,6 @@ class MainWindow(QMainWindow):
         opt_layout.addWidget(self._save_button)
 
         layout.addWidget(cert_card, 1)
-        layout.addWidget(net_card, 0)
         layout.addWidget(options_card, 0)
 
         scroll = QScrollArea()
@@ -515,7 +502,6 @@ class MainWindow(QMainWindow):
         selected = self._selected()
         ready = self._pdf_data is not None and bool(selected)
         self._sign_button.setEnabled(ready)
-        self._host_button.setEnabled(self._pdf_data is not None)
         if not selected:
             self._status.setText("Выберите хотя бы один сертификат")
         elif self._pdf_data is None:
@@ -692,26 +678,10 @@ class MainWindow(QMainWindow):
         )
 
     # ------------------------------------------------------------- network
-    def _open_host_session(self) -> None:
-        if self._pdf_data is None:
-            QMessageBox.information(
-                self, "Сетевая сессия", "Сначала выберите PDF — он станет документом сессии."
-            )
-            return
-        from .netdialog import HostSessionDialog
+    def _open_network(self) -> None:
+        from .network_ui import run_network_menu
 
-        name = self._pdf_path.name if self._pdf_path else "document.pdf"
-        dialog = HostSessionDialog(self._pdf_data, name, parent=self)
-        dialog.exec()
-        result = dialog.result_bytes
-        if result and result != self._pdf_data:
-            self._adopt_result(result, source="сетевая сессия")
-        self._refresh_state()
-
-    def _open_join_session(self) -> None:
-        from .netdialog import JoinSessionDialog
-
-        JoinSessionDialog(parent=self).exec()
+        run_network_menu(self)
 
     def _adopt_result(self, data: bytes, source: str = "подписание") -> None:
         """Adopt a new revision produced outside the local signing flow."""
@@ -726,6 +696,12 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------- events
     def _show_about(self) -> None:
         about.show_about(self)
+
+    def eventFilter(self, obj, event) -> bool:
+        if obj is self._drop and event.type() == QEvent.Type.MouseButtonRelease:
+            self._choose_pdf()
+            return True
+        return super().eventFilter(obj, event)
 
     def dragEnterEvent(self, event) -> None:
         if event.mimeData().hasUrls():

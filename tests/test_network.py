@@ -1,12 +1,14 @@
-"""Offline protocol test for LAN signing sessions: no token required.
+"""Offline test for LAN signing sessions: real HTTP server on localhost.
 
-Two «participants» sign through a real HTTP server on localhost with a stub
-CMS built by asn1crypto (messageDigest = Streebog-256 of the document).
+Sequential mode: two participants sign through the prepare/commit flow with a
+stub CMS built by asn1crypto (messageDigest = Streebog-256 of the exact bytes
+handed out by the host).  Parallel mode: detached .sig collection.
 
 Run with:  python tests/test_network.py
 """
 from __future__ import annotations
 
+import base64
 import pathlib
 import sys
 
@@ -21,7 +23,7 @@ from asn1crypto import cms as asn1cms  # noqa: E402
 from asn1crypto import core as asncore  # noqa: E402
 from asn1crypto import x509 as asn1x509  # noqa: E402
 
-from pdfsign import crypto, netsession, pdf as pdfmod  # noqa: E402
+from pdfsign import crypto, network, pdf as pdfmod  # noqa: E402
 
 
 def make_test_cms(content: bytes) -> bytes:
@@ -75,128 +77,204 @@ def find_fixture() -> pathlib.Path:
     raise SystemExit("Не найден тестовый PDF (unsigned.pdf)")
 
 
-CERT = {
-    "thumbprint": "A1B2C3D4E5F6",
-    "subject": "CN=Тестовый Подписант",
-    "issuer": "CN=Тестовый УЦ",
-    "serial": "01",
-    "surname": "Подписант",
-    "given_name": "Тестовый",
-    "organization": "ООО «Тест»",
-    "position": "Директор",
-    "not_before": "2026-01-01T00:00:00",
-    "not_after": "2028-01-01T00:00:00",
-}
+class StubCert:
+    def __init__(self, name: str, thumb: str):
+        self.display_name = name
+        self.organization = "ООО «Тест»"
+        self.position = "Директор"
+        self.common_name = name
+        self.validity_text = "01.01.2026 — 01.01.2028"
+        self.serial = "01"
+        self.thumbprint = thumb
+
+
+def check_final_document(data: bytes, expected: int, failures: list[str]) -> None:
+    fields = pdfmod.list_signatures(data)
+    if len(fields) != expected:
+        failures.append(f"ожидалось {expected} подписей в документе, получено {len(fields)}")
+    if fields and not fields[-1].covers_whole_file:
+        failures.append("последняя подпись должна покрывать весь файл")
+    for field in fields:
+        digest = crypto.cms_message_digest(field.contents)
+        actual = crypto.streebog256(field.signed_bytes)
+        if digest is None or actual is None or bytes(digest) != bytes(actual):
+            failures.append(f"{field.field_name}: хеш подписи не совпадает с подписанными байтами")
+
+
+def test_sequential(source: bytes, failures: list[str]) -> None:
+    config = network.SessionConfig(mode=network.MODE_SEQUENTIAL, visible=False, doc_name="test.pdf")
+    session = network.SignSession(source, config)
+    server = network.SessionServer(session, port=0)
+    server.start()
+    base = f"http://127.0.0.1:{server.port}"
+    try:
+        code = session.code
+
+        # wrong code rejected
+        bad = network.SessionClient(base, "ZZZZZZ")
+        try:
+            bad.info()
+            failures.append("неверный код должен быть отклонён")
+        except network.NetworkError:
+            pass
+
+        # web status page renders
+        import urllib.request
+        page = urllib.request.urlopen(base, timeout=5).read().decode("utf-8")
+        if "сетевая сессия" not in page.lower():
+            failures.append("веб-страница статусов не отрисовалась")
+
+        first = network.SessionClient(base, code)
+        first.info()
+        first.join(StubCert("Первый Подписант", "AA11"))
+        signed_one = first.prepare()
+        if not signed_one.startswith(b"%PDF-"):
+            failures.append("подготовленные байты должны начинаться с заголовка PDF")
+        first.commit(make_test_cms(signed_one))
+        state = first.state()
+        if state.get("doc_version") != 2:
+            failures.append(f"после первой подписи версия должна быть 2, получена {state.get('doc_version')}")
+        statuses = {p["id"]: p["status"] for p in state.get("participants") or []}
+        if statuses.get(first.participant_id) != network.STATUS_SIGNED:
+            failures.append("статус первого участника должен быть signed")
+
+        # duplicate certificate cannot join twice
+        dupe = network.SessionClient(base, code)
+        try:
+            dupe.join(StubCert("Первый снова", "AA11"))
+            failures.append("дублирующийся сертификат должен быть отклонён")
+        except network.NetworkError:
+            pass
+
+        # second participant: queue busy while a reservation is held
+        second = network.SessionClient(base, code)
+        second.join(StubCert("Второй Подписант", "BB22"))
+        reserved = second.prepare()
+        third = network.SessionClient(base, code)
+        third.join(StubCert("Третий Подписант", "CC33"))
+        try:
+            third.prepare()
+            failures.append("prepare во время чужой резервации должен быть отклонён")
+        except network.NetworkError as exc:
+            if "Подождите" not in str(exc):
+                failures.append(f"неожиданная ошибка очереди: {exc}")
+        # digest mismatch discards the reservation and marks the participant
+        try:
+            second.commit(make_test_cms(b"soversenno drugie bajty"))
+            failures.append("CMS с неверным хешем должен быть отклонён")
+        except network.NetworkError:
+            pass
+        state = second.state()
+        statuses = {p["id"]: p["status"] for p in state.get("participants") or []}
+        if statuses.get(second.participant_id) != network.STATUS_ERROR:
+            failures.append("после неверной подписи статус должен быть error")
+        if state.get("doc_version") != 2:
+            failures.append("неверная подпись не должна менять версию документа")
+
+        # second signs correctly after the error
+        fresh = second.prepare()
+        second.commit(make_test_cms(fresh))
+        state = second.state()
+        if state.get("doc_version") != 3:
+            failures.append(f"после второй подписи версия должна быть 3, получена {state.get('doc_version')}")
+
+        # decline works and frees nothing
+        third.decline("не согласен")
+        state = third.state()
+        statuses = {p["id"]: p["status"] for p in state.get("participants") or []}
+        if statuses.get(third.participant_id) != network.STATUS_DECLINED:
+            failures.append("статус должен быть declined")
+
+        check_final_document(session.document_bytes(), 2, failures)
+        document, sig_files, note = session.results()
+        if sig_files:
+            failures.append("в последовательном режиме .sig файлов быть не должно")
+        if "2" not in note:
+            failures.append(f"в итоговой заметке должно быть число подписей: {note}")
+    finally:
+        server.shutdown()
+
+
+def test_parallel(source: bytes, failures: list[str]) -> None:
+    config = network.SessionConfig(mode=network.MODE_PARALLEL, doc_name="test.pdf")
+    session = network.SignSession(source, config)
+    server = network.SessionServer(session, port=0)
+    server.start()
+    base = f"http://127.0.0.1:{server.port}"
+    try:
+        one = network.SessionClient(base, session.code)
+        one.join(StubCert("Первый Подписант", "AA11"))
+        data, version = one.document()
+        if data != source:
+            failures.append("в параллельном режиме участник получает исходный файл")
+        one.submit(version, make_test_cms(source))
+
+        two = network.SessionClient(base, session.code)
+        two.join(StubCert("Второй Подписант", "BB22"))
+        data2, version2 = two.document()
+        two.submit(version2, make_test_cms(data2))
+
+        state = two.state()
+        signed = [p for p in state.get("participants") or [] if p["status"] == network.STATUS_SIGNED]
+        if len(signed) != 2:
+            failures.append("должно быть 2 подписавших участника")
+
+        document, sig_files, note = session.results()
+        if document != source:
+            failures.append("параллельный итог — исходный документ без изменений")
+        if len(sig_files) != 2:
+            failures.append(f"ожидалось 2 файла .sig, получено {len(sig_files)}")
+        for name, cms in sig_files:
+            if not name.endswith(".sig"):
+                failures.append(f"имя файла подписи должно оканчиваться на .sig: {name}")
+            digest = crypto.cms_message_digest(cms)
+            actual = crypto.streebog256(source)
+            if bytes(digest) != bytes(actual):
+                failures.append(f"{name}: хеш .sig не соответствует исходному документу")
+    finally:
+        server.shutdown()
+
+
+def test_strict_order(source: bytes, failures: list[str]) -> None:
+    config = network.SessionConfig(
+        mode=network.MODE_SEQUENTIAL, strict_order=True, visible=False, doc_name="test.pdf"
+    )
+    session = network.SignSession(source, config)
+    server = network.SessionServer(session, port=0)
+    server.start()
+    base = f"http://127.0.0.1:{server.port}"
+    try:
+        one = network.SessionClient(base, session.code)
+        one.join(StubCert("Первый", "AA11"))
+        two = network.SessionClient(base, session.code)
+        two.join(StubCert("Второй", "BB22"))
+        try:
+            two.prepare()
+            failures.append("строгая очередь: второй не должен подписывать первым")
+        except network.NetworkError as exc:
+            if "очередь" not in str(exc).lower() and "Подписывает" not in str(exc):
+                failures.append(f"неожиданный отказ строгой очереди: {exc}")
+        signed_one = one.prepare()
+        one.commit(make_test_cms(signed_one))
+        signed_two = two.prepare()
+        two.commit(make_test_cms(signed_two))
+        check_final_document(session.document_bytes(), 2, failures)
+    finally:
+        server.shutdown()
 
 
 def main() -> int:
     source = find_fixture().read_bytes()
-    code = "424242"
-    state = netsession.SessionState(source, "test.pdf", code, visible=False)
-    server = netsession.SessionServer(state, port=0)
-    server.start()
-    base = f"http://127.0.0.1:{server.port}"
     failures: list[str] = []
-
-    try:
-        # wrong code rejected
-        try:
-            netsession.session_info(base, "000000")
-            failures.append("неверный код должен быть отклонён")
-        except netsession.SessionError as exc:
-            if exc.status != 403:
-                failures.append(f"неверный код: ожидался 403, получен {exc.status}")
-
-        # join + fetch document
-        pid_one, info = netsession.join_session(base, code, "Первый")
-        if info.get("signatures") != 0:
-            failures.append("в начале сессии подписей быть не должно")
-        document = netsession.fetch_document(base, code)
-        if document != source:
-            failures.append("документ участника отличается от исходного")
-
-        # first participant: prepare -> sign the exact bytes -> commit
-        signed_bytes = netsession.prepare_signature(base, code, pid_one, CERT)
-        if not signed_bytes.startswith(b"%PDF-"):
-            failures.append("подготовленные байты должны начинаться с заголовка PDF")
-        cms_one = make_test_cms(signed_bytes)
-        field_one, _ = netsession.commit_signature(base, code, pid_one, cms_one)
-        if field_one != "Signature1":
-            failures.append(f"ожидалось Signature1, получено {field_one}")
-        info = netsession.session_info(base, code)
-        if info.get("signatures") != 1:
-            failures.append("после первой подписи должна быть 1")
-        statuses = {p["pid"]: p["status"] for p in info.get("participants") or []}
-        if statuses.get(pid_one) != netsession.STATUS_SIGNED:
-            failures.append("статус первого участника должен быть signed")
-
-        # second participant is queued while the first prepares a signature
-        pid_two, _ = netsession.join_session(base, code, "Второй")
-        reserved = netsession.prepare_signature(base, code, pid_two, CERT)
-        try:
-            netsession.prepare_signature(base, code, pid_one, CERT)
-            failures.append("второй prepare должен быть отклонён с BUSY")
-        except netsession.SessionError as exc:
-            if exc.code != "BUSY":
-                failures.append(f"ожидался код BUSY, получен {exc.code}")
-        # wrong participant cannot commit another's reservation
-        wrong_cms = make_test_cms(reserved)
-        try:
-            netsession.commit_signature(base, code, pid_one, wrong_cms)
-            failures.append("чужой commit должен быть отклонён")
-        except netsession.SessionError as exc:
-            if exc.code != "NO_PENDING":
-                failures.append(f"ожидался код NO_PENDING, получен {exc.code}")
-        # digest mismatch discards the reservation and marks the participant
-        bad_cms = make_test_cms(b"not the prepared bytes")
-        try:
-            netsession.commit_signature(base, code, pid_two, bad_cms)
-            failures.append("подпись с неверным хешем должна быть отклонена")
-        except netsession.SessionError as exc:
-            if exc.code != "DIGEST_MISMATCH":
-                failures.append(f"ожидался код DIGEST_MISMATCH, получен {exc.code}")
-        info = netsession.session_info(base, code)
-        statuses = {p["pid"]: p["status"] for p in info.get("participants") or []}
-        if statuses.get(pid_two) != netsession.STATUS_ERROR:
-            failures.append("после неверной подписи статус должен быть error")
-        if info.get("signatures") != 1:
-            failures.append("неверная подпись не должна добавлять ревизию")
-
-        # after cancel/error the reservation is free again: second signs properly
-        netsession.cancel_signature(base, code, pid_two)
-        fresh_bytes = netsession.prepare_signature(base, code, pid_two, CERT)
-        cms_two = make_test_cms(fresh_bytes)
-        field_two, _ = netsession.commit_signature(base, code, pid_two, cms_two)
-        if field_two != "Signature2":
-            failures.append(f"ожидалось Signature2, получено {field_two}")
-
-        # final document structure
-        final = state.pdf_bytes
-        fields = pdfmod.list_signatures(final)
-        if len(fields) != 2:
-            failures.append(f"ожидалось 2 подписи в документе, получено {len(fields)}")
-        if fields and not fields[-1].covers_whole_file:
-            failures.append("последняя подпись должна покрывать весь файл")
-        for field in fields:
-            digest = crypto.cms_message_digest(field.contents)
-            actual = crypto.streebog256(field.signed_bytes)
-            if digest is None or actual is None or digest != actual:
-                failures.append(f"{field.field_name}: хеш подписи не совпадает с подписанными байтами")
-        info = state.info()
-        if info.get("signatures") != 2:
-            failures.append("info: должно быть 2 подписи")
-        signed = [p for p in info.get("participants") or [] if p["status"] == "signed"]
-        if len(signed) != 2:
-            failures.append("должно быть 2 участника со статусом signed")
-    finally:
-        server.stop()
-
+    test_sequential(source, failures)
+    test_parallel(source, failures)
+    test_strict_order(source, failures)
     if failures:
         print("FAILED")
         for failure in failures:
             print("  -", failure)
         return 1
-    print("OK: сетевая сессия — очередь prepare/commit, статусы, отказ чужой и неверной подписи")
+    print("OK: последовательный и параллельный режимы, очередь, отказы, .sig")
     return 0
 
 
