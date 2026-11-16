@@ -34,33 +34,105 @@ CADESCOM_BASE64_TO_BINARY = 1
 CONTENT_DIGEST_CHECK = True
 
 STREEBOG_OID = "1.2.643.7.1.1.2.2"
+STREEBOG512_OID = "1.2.643.7.1.1.2.3"
+
+# Digest algorithm OID -> hashlib/gostcrypto name.  CryptoPro chooses the digest
+# from the certificate key: GOST 2012-256 uses Streebog-256, GOST 2012-512 uses
+# Streebog-512, RSA/ECC certificates use SHA-*.  Comparing every CMS against
+# Streebog-256 rejects valid signatures with other algorithms (e.g. on another
+# machine whose certificate is GOST-512), so the algorithm is always read from
+# the CMS first.
+DIGEST_ALGORITHMS = {
+    STREEBOG_OID: "streebog256",
+    STREEBOG512_OID: "streebog512",
+    "1.2.643.2.2.9": "gost94",
+    "2.16.840.1.101.3.4.2.1": "sha256",
+    "2.16.840.1.101.3.4.2.2": "sha384",
+    "2.16.840.1.101.3.4.2.3": "sha512",
+    "1.3.14.3.2.26": "sha1",
+}
+
+DIGEST_LABELS = {
+    STREEBOG_OID: "ГОСТ-хеш (Стрибог-256)",
+    STREEBOG512_OID: "ГОСТ-хеш (Стрибог-512)",
+    "1.2.643.2.2.9": "ГОСТ 34.11-94",
+    "2.16.840.1.101.3.4.2.1": "SHA-256",
+    "2.16.840.1.101.3.4.2.2": "SHA-384",
+    "2.16.840.1.101.3.4.2.3": "SHA-512",
+    "1.3.14.3.2.26": "SHA-1",
+}
 
 
 def streebog256(data: bytes) -> bytes | None:
     """GOST R 34.11-2012 256-bit digest, or None when no implementation exists."""
-    try:
-        from gostcrypto import gosthash
+    return digest_for_oid(STREEBOG_OID, data)
 
-        digest = gosthash.new("streebog256")
-        digest.update(data)
-        return digest.digest()
+
+def digest_for_oid(oid: str, data: bytes) -> bytes | None:
+    """Compute the digest named by a CMS algorithm OID, if it is supported."""
+    name = DIGEST_ALGORITHMS.get((oid or "").strip())
+    if not name:
+        return None
+    if name in ("streebog256", "streebog512"):
+        try:
+            from gostcrypto import gosthash
+
+            digest = gosthash.new(name)
+            digest.update(data)
+            return bytes(digest.digest())
+        except Exception:
+            return None
+    try:
+        import hashlib
+
+        return hashlib.new(name, data).digest()
     except Exception:
         return None
 
 
-def cms_message_digest(cms_der: bytes) -> bytes | None:
-    """Return the messageDigest signed attribute of the first signer."""
+def cms_digest_info(cms_der: bytes) -> tuple[str, bytes] | None:
+    """(digest algorithm OID, messageDigest value) of the first signer."""
     try:
         from asn1crypto import cms as asn1cms
 
         content = asn1cms.ContentInfo.load(cms_der)["content"]
         signer = content["signer_infos"][0]
+        oid = str(signer["digest_algorithm"]["algorithm"].dotted)
         for attribute in signer["signed_attrs"]:
             if attribute["type"].native == "message_digest":
-                return attribute["values"][0].native
+                return oid, bytes(attribute["values"][0].native)
     except Exception:
         return None
     return None
+
+
+def cms_message_digest(cms_der: bytes) -> bytes | None:
+    """Return the messageDigest signed attribute of the first signer."""
+    info = cms_digest_info(cms_der)
+    return info[1] if info else None
+
+
+def cms_digest_status(cms_der: bytes, data: bytes) -> tuple[bool | None, str]:
+    """Compare the CMS digest with the document.
+
+    ``True`` — the digest matches, ``False`` — it does not, ``None`` — the
+    algorithm is unknown or no local implementation exists (the caller can fall
+    back to CryptoPro's own verification).
+    """
+    info = cms_digest_info(cms_der)
+    if info is None:
+        return None, "в подписи нет атрибута messageDigest"
+    oid, expected = info
+    label = DIGEST_LABELS.get(oid, f"алгоритм {oid}")
+    actual = digest_for_oid(oid, data)
+    if actual is None:
+        return None, f"локальная проверка {label} недоступна"
+    if expected == actual:
+        return True, f"{label} совпадает с подписанным значением"
+    return False, (
+        f"{label} НЕ совпадает с подписанным значением "
+        f"(в подписи {len(expected)} байт, у документа {len(actual)} байт)"
+    )
 
 _UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 _DN_ALIASES = {
@@ -420,17 +492,11 @@ def _assert_cms_covers(cms: bytes, content: bytes) -> None:
     """Fail loudly when the CMS digest does not describe ``content`` bytes."""
     if not CONTENT_DIGEST_CHECK:
         return
-    expected = cms_message_digest(cms)
-    if expected is None:
-        return
-    actual = streebog256(content)
-    if actual is None:
-        return
-    if expected != actual:
+    status, note = cms_digest_status(cms, content)
+    if status is False:
         raise CryptoError(
-            "CryptoPro создал подпись над закодированным текстом, а не над байтами "
-            "документа: такая подпись не пройдёт проверку в Adobe и других системах. "
-            "Проверьте версию CAdESCOM и ContentEncoding.",
+            "CryptoPro создал подпись над другими данными: " + note + ". "
+            "Такая подпись не пройдёт проверку у организатора и в Adobe.",
             "CMS_DIGEST_MISMATCH",
         )
 
@@ -439,25 +505,14 @@ def verify_detached(cms: bytes, content: bytes) -> tuple[bool, str]:
     """Verify a detached CMS over ``content``.
 
     Two independent checks are combined: the CMS ``messageDigest`` attribute is
-    compared with a local Streebog-256 of the document bytes, and CryptoPro is
-    asked to verify the signature.  The digest check is deterministic, while the
-    CryptoPro check may be unavailable when the key container cannot be opened —
-    in that case the digest result is still reported.
+    compared with a locally computed digest of the *same algorithm* (Streebog-256,
+    Streebog-512, SHA-256, ...), and CryptoPro is asked to verify the signature.
+    The digest check is deterministic, while the CryptoPro check may be
+    unavailable when the key container cannot be opened — in that case the
+    digest result is still reported.
     """
-    digest_ok = False
-    digest_detail = ""
-    expected = cms_message_digest(cms)
-    if expected is not None:
-        actual = streebog256(content)
-        if actual is None:
-            digest_detail = "локальная проверка ГОСТ-хеша недоступна"
-        else:
-            digest_ok = expected == actual
-            digest_detail = (
-                "SHA-256-совместимый ГОСТ-хеш документа совпадает"
-                if digest_ok
-                else "ГОСТ-хеш документа НЕ совпадает с подписанным значением"
-            )
+    status, digest_detail = cms_digest_status(cms, content)
+    digest_ok = status is True
 
     com.ensure_initialized()
     try:
@@ -465,7 +520,10 @@ def verify_detached(cms: bytes, content: bytes) -> tuple[bool, str]:
         signed_data.ContentEncoding = CADESCOM_BASE64_TO_BINARY
         signed_data.Content = base64.b64encode(content).decode("ascii")
         signed_data.VerifyCades(base64.b64encode(cms).decode("ascii"), CADES_BES, True)
-        return True, "Подпись верна (проверено CryptoPro CSP и ГОСТ-хеш)"
+        note = "Подпись верна (проверено CryptoPro CSP)"
+        if digest_ok:
+            note += f"; {digest_detail}"
+        return True, note
     except Exception as exc:
         message = str(exc)
         container_busy = any(
@@ -474,13 +532,15 @@ def verify_detached(cms: bytes, content: bytes) -> tuple[bool, str]:
         )
         if digest_ok:
             return True, (
-                "ГОСТ-хеш документа совпадает с подписанным; "
-                "проверка подписи через CryptoPro сейчас недоступна "
-                "(занят контейнер ключа)"
-                if container_busy
-                else "ГОСТ-хеш документа совпадает с подписанным"
+                digest_detail
+                + (
+                    "; проверка подписи через CryptoPro сейчас недоступна "
+                    "(занят контейнер ключа)"
+                    if container_busy
+                    else ""
+                )
             )
-        if digest_detail:
+        if status is False:
             return False, digest_detail
         return False, f"Не удалось проверить подпись: {message}"
 

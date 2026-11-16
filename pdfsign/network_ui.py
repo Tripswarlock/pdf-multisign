@@ -271,64 +271,45 @@ class CertificateChooser(QWidget):
                 return row.info
         return None
 
+    def first_usable(self):
+        """First certificate that can actually sign right now."""
+        from .window import CertificateRow
 
-class HostCertificateDialog(QDialog):
-    """The organizer picks its own certificate to sign with."""
+        for row in self._rows:
+            if (
+                isinstance(row, CertificateRow)
+                and row.info.sign_capable
+                and row.info.is_valid_now
+            ):
+                return row.info
+        return None
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Сертификат организатора")
-        self.resize(600, 520)
-        self.setStyleSheet(theme.stylesheet())
+    def select(self, cert, notify: bool = True) -> bool:
+        """Select a certificate by thumbprint (single selection)."""
+        from .window import CertificateRow
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(22, 20, 22, 16)
-        layout.setSpacing(12)
-
-        title = QLabel("Подпись организатора")
-        title.setObjectName("SectionTitle")
-        layout.addWidget(title)
-        hint = QLabel(
-            "Документ будет подписан вашим CryptoPro CSP — так же, как у участников. "
-            "Подпись войдёт в итоговый файл (последовательная схема) или в архив "
-            "отдельным .sig (соподпись)."
+        rows = [row for row in self._rows if isinstance(row, CertificateRow)]
+        target = next(
+            (
+                row
+                for row in rows
+                if cert is not None and row.info.thumbprint == cert.thumbprint
+            ),
+            None,
         )
-        hint.setObjectName("Caption")
-        hint.setWordWrap(True)
-        layout.addWidget(hint)
-
-        self._chooser = CertificateChooser(self)
-        self._chooser.changed.connect(self._refresh)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-        scroll.setWidget(self._chooser)
-        layout.addWidget(scroll, 1)
-
-        buttons = QHBoxLayout()
-        buttons.addStretch(1)
-        cancel = QPushButton("Отмена")
-        cancel.setObjectName("Text")
-        cancel.clicked.connect(self.reject)
-        buttons.addWidget(cancel)
-        self._ok = QPushButton("Подписать")
-        self._ok.setObjectName("Filled")
-        self._ok.clicked.connect(self.accept)
-        buttons.addWidget(self._ok)
-        layout.addLayout(buttons)
-
-        self._refresh()
-
-    def _refresh(self) -> None:
-        cert = self._chooser.selected()
-        usable = cert is not None and cert.sign_capable and cert.is_valid_now
-        self._ok.setEnabled(usable)
-        self._ok.setToolTip(
-            "" if usable else "Выберите действующий сертификат с ключом CryptoPro"
-        )
-
-    def selected(self):
-        return self._chooser.selected()
+        if target is None:
+            return False
+        changed = not target.is_checked
+        if changed:
+            self._updating = True
+            try:
+                for row in rows:
+                    row.set_checked(row is target)
+            finally:
+                self._updating = False
+        if notify and changed:
+            self.changed.emit()
+        return True
 
 
 # ---------------------------------------------------------------------------
@@ -526,79 +507,44 @@ class HostSetupDialog(QDialog):
 
 
 # ---------------------------------------------------------------------------
-# Host: signing with the organizer's own certificate
+# Host: client-shaped adapter for the organizer's own signature
 # ---------------------------------------------------------------------------
 
-class HostSignWorker(QThread):
-    """Signs the session document with a local certificate (in-process)."""
+class LocalSessionClient:
+    """Participant API over the in-process session for the organizer.
 
-    progress = Signal(str)
-    done = Signal(str)
-    failed = Signal(str)
+    The organizer signs through exactly the same ``ClientSignWorker`` flow as a
+    remote participant (prepare/commit or submit), just without HTTP.
+    """
 
-    def __init__(self, session: network.SignSession, token: str, thumbprint: str,
-                 mode: str):
-        super().__init__()
+    def __init__(self, session: network.SignSession, participant: network.Participant):
         self._session = session
-        self._token = token
-        self._thumbprint = thumbprint
-        self._mode = mode
+        self.token = participant.token
+        self.participant_id = participant.pid
 
-    def run(self) -> None:
-        try:
-            if self._mode == network.MODE_SEQUENTIAL:
-                note = self._sign_sequential()
-            else:
-                note = self._sign_parallel()
-            self.done.emit(note)
-        except crypto.CryptoError as exc:
-            self._session.cancel_pending(self._token)
-            self.failed.emit(str(exc))
-        except network.NetworkError as exc:
-            self._session.cancel_pending(self._token)
-            self.failed.emit(str(exc))
-        except Exception as exc:  # pragma: no cover - defensive
-            self._session.cancel_pending(self._token)
-            self.failed.emit(f"Непредвиденная ошибка: {exc}")
+    def state(self) -> dict:
+        return self._session.snapshot()
 
-    def _sign_sequential(self) -> str:
-        attempts = 6
-        for attempt in range(attempts):
-            try:
-                signed_bytes, _version = self._session.prepare_signature(self._token)
-            except network.NetworkError as exc:
-                text = str(exc)
-                # strict-order violations are final; a busy reservation is retried
-                retry = attempt < attempts - 1 and "Подождите" in text
-                if not retry:
-                    raise
-                self.progress.emit(f"{text} (повтор через 3 с)…")
-                time.sleep(3)
-                continue
-            self.progress.emit(
-                "CryptoPro создаёт отсоединённую подпись CAdES-BES…"
-                if attempt == 0 else "Документ обновился, подписываем заново…"
-            )
-            cms = crypto.sign_detached(signed_bytes, self._thumbprint)
-            self.progress.emit("Подпись встраивается в документ…")
-            try:
-                return self._session.commit_signature(self._token, cms)
-            except network.NetworkError as exc:
-                self._session.cancel_pending(self._token)
-                if attempt < attempts - 1 and any(
-                    marker in str(exc).lower() for marker in ("верси", "заново", "найдена")
-                ):
-                    continue
-                raise
-        raise network.NetworkError("Не удалось подписать документ за несколько попыток")
+    def document(self) -> tuple[bytes, int]:
+        return self._session.document_bytes(), self._session.version
 
-    def _sign_parallel(self) -> str:
-        self.progress.emit("CryptoPro создаёт отсоединённую подпись CAdES-BES…")
-        cms = crypto.sign_detached(self._session.document_bytes(), self._thumbprint)
-        self.progress.emit("Подпись добавляется в пакет…")
-        return self._session.submit_signature(
-            self._token, self._session.version, cms
-        )
+    def prepare(self) -> bytes:
+        return self._session.prepare_signature(self.token)[0]
+
+    def commit(self, cms: bytes) -> None:
+        self._session.commit_signature(self.token, cms)
+
+    def cancel_pending(self) -> None:
+        self._session.cancel_pending(self.token)
+
+    def set_status(self, status: str, detail: str = "") -> None:
+        self._session.set_status(self.token, status, detail)
+
+    def decline(self, reason: str = "") -> None:
+        self._session.decline(self.token, reason)
+
+    def submit(self, doc_version: int, cms: bytes) -> None:
+        self._session.submit_signature(self.token, doc_version, cms)
 
 
 # ---------------------------------------------------------------------------
@@ -614,12 +560,15 @@ class HostSessionDialog(QDialog):
         self._session = session
         self._server = server
         self.setWindowTitle("Сетевая сессия — организатор")
-        self.resize(700, 660)
+        self.resize(720, 760)
         self.setStyleSheet(theme.stylesheet())
         self._saved = False
         self._host_participant: network.Participant | None = None
         self._host_cert = None
-        self._host_worker: HostSignWorker | None = None
+        self._host_client: LocalSessionClient | None = None
+        self._host_worker: ClientSignWorker | None = None
+        self._host_signed = False
+        self._known_names: dict[str, str] = {}
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(22, 20, 22, 18)
@@ -662,13 +611,46 @@ class HostSessionDialog(QDialog):
         self._links_edit.setReadOnly(True)
         self._links_edit.setMinimumWidth(150)
         self._links_edit.setToolTip("Адреса для подключения участников")
-        info_layout.addWidget(self._links_edit)
-
+        links_row = QHBoxLayout()
+        links_row.addWidget(self._links_edit, 1)
         copy = QPushButton("Скопировать приглашение")
         copy.setObjectName("Tonal")
         copy.clicked.connect(self._copy_invite)
-        info_layout.addWidget(copy, 0, Qt.AlignmentFlag.AlignLeft)
+        links_row.addWidget(copy)
+        info_layout.addLayout(links_row)
+
+        self._host_status = QLabel()
+        self._host_status.setTextFormat(Qt.TextFormat.RichText)
+        info_layout.addWidget(self._host_status)
         layout.addWidget(info_card)
+
+        cert_card, cert_layout = _card("Ваш сертификат")
+        _shadow(cert_card)
+        hint_row = QHBoxLayout()
+        hint = QLabel(
+            "Выберите сертификат — им вы подпишете документ как организатор."
+        )
+        hint.setObjectName("Caption")
+        hint.setWordWrap(True)
+        hint_row.addWidget(hint, 1)
+        self._refresh_certs = QPushButton("Обновить")
+        self._refresh_certs.setObjectName("Text")
+        self._refresh_certs.setToolTip(
+            "Перечитать список сертификатов (например, после подключения токена)"
+        )
+        self._refresh_certs.clicked.connect(self._reload_certificates)
+        hint_row.addWidget(self._refresh_certs, 0, Qt.AlignmentFlag.AlignTop)
+        cert_layout.addLayout(hint_row)
+        self._certs = CertificateChooser()
+        self._certs.changed.connect(self._on_host_cert_changed)
+        cert_scroll = QScrollArea()
+        cert_scroll.setWidgetResizable(True)
+        cert_scroll.setMinimumHeight(110)
+        cert_scroll.setMaximumHeight(125)
+        cert_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        cert_scroll.setWidget(self._certs)
+        cert_layout.addWidget(cert_scroll, 1)
+        layout.addWidget(cert_card)
 
         status_card, status_layout = _card("Статусы участников")
         _shadow(status_card)
@@ -677,6 +659,7 @@ class HostSessionDialog(QDialog):
         self._summary.setWordWrap(True)
         status_layout.addWidget(self._summary)
         self._table = _status_table()
+        self._table.setMinimumHeight(150)
         self._table.setSelectionMode(QTreeWidget.SelectionMode.SingleSelection)
         self._table.setDragDropMode(QTreeWidget.DragDropMode.InternalMove)
         self._table.setDefaultDropAction(Qt.DropAction.MoveAction)
@@ -704,8 +687,7 @@ class HostSessionDialog(QDialog):
         status_layout.addLayout(order_row)
 
         self._hint = QLabel(
-            "Страница статусов также открывается в браузере по адресу сессии — "
-            "удобно показывать на общем экране."
+            "Страница статусов также открывается в браузере по адресу сессии."
         )
         self._hint.setObjectName("Caption")
         self._hint.setWordWrap(True)
@@ -762,11 +744,18 @@ class HostSessionDialog(QDialog):
         self._timer.setInterval(800)
         self._timer.timeout.connect(self._tick)
         self._timer.start()
+        self._auto_join_host()
         self._tick()
 
     # ------------------------------------------------------------------ logic
     def _tick(self) -> None:
         snap = self._session.snapshot()
+        current = {p["id"]: p["name"] for p in snap["participants"]}
+        for pid, name in self._known_names.items():
+            if pid not in current:
+                self._log_message(f"«{name}» отключился — убран из списка")
+        self._known_names = current
+
         host_pid = self._host_participant.pid if self._host_participant else ""
         _fill_status_table(
             self._table, snap, highlight_id=host_pid, show_handle=self._order_enabled
@@ -780,25 +769,122 @@ class HostSessionDialog(QDialog):
             f"отказалось: {declined} · подписывает: {signing} · "
             f"версия документа: {snap['doc_version']}"
         )
+        host_row = next(
+            (p for p in snap["participants"] if p["id"] == host_pid), None
+        )
+        self._host_signed = bool(
+            host_row and host_row["status"] == network.STATUS_SIGNED
+        )
+        if self._host_signed:
+            self._certs.setEnabled(False)
+            self._refresh_certs.setEnabled(False)
         self._update_sign_button(snap)
+
+    def _set_host_status(self) -> None:
+        if self._host_participant is None:
+            self._host_status.setText(
+                f'<span style="color:{theme.OUTLINE}; font-size:15px;">●</span> '
+                f'<span style="color:{theme.OUTLINE};">Вы ещё не в сессии — '
+                "выберите сертификат</span>"
+            )
+            return
+        color = theme.SUCCESS
+        name = html.escape(self._host_participant.name)
+        suffix = " · подпись добавлена" if self._host_signed else ""
+        self._host_status.setText(
+            f'<span style="color:{color}; font-size:15px;">●</span> '
+            f'<span style="color:{color};">Вы в сессии как {name} '
+            f'(организатор){suffix}</span>'
+        )
 
     def _update_sign_button(self, snap: dict) -> None:
         if self._host_worker is not None:
             return
-        if self._host_participant is None:
+        busy = self._host_signed or snap["finished"]
+        enabled = (
+            self._host_participant is not None
+            and self._host_cert is not None
+            and self._host_client is not None
+            and not busy
+        )
+        if self._host_signed:
+            self._sign.setText("Подписано ✓")
+        else:
             self._sign.setText("Подписать документ")
-            self._sign.setEnabled(not snap["finished"])
+        self._sign.setEnabled(enabled)
+        if self._host_participant is None or self._host_cert is None:
+            self._sign.setToolTip(
+                "Сначала выберите сертификат в блоке «Ваш сертификат»"
+            )
+        else:
+            self._sign.setToolTip("Подписать документ своим сертификатом как организатор")
+        if not self._host_signed and self._host_worker is None:
+            self._certs.setEnabled(True)
+            self._refresh_certs.setEnabled(True)
+        self._set_host_status()
+
+    # ------------------------------------------------------ host membership
+    def _auto_join_host(self) -> None:
+        if self._host_participant is not None:
             return
-        for item in snap["participants"]:
-            if item["id"] != self._host_participant.pid:
-                continue
-            if item["status"] == network.STATUS_SIGNED:
-                self._sign.setText("Подписано ✓")
-                self._sign.setEnabled(False)
+        cert = self._certs.first_usable()
+        if cert is None:
+            self._set_host_status()
+            self._log_message(
+                "Нет сертификата, доступного для подписи — вы не в сессии. "
+                "Установите сертификат и нажмите «Обновить»."
+            )
+            return
+        self._certs.select(cert, notify=False)
+        self._join_host(cert)
+
+    def _join_host(self, cert) -> bool:
+        if self._host_participant is not None:
+            return True
+        try:
+            participant = self._session.join_host(network.certificate_payload(cert))
+        except network.NetworkError as exc:
+            self._log_message(f"✗ {exc}")
+            self._set_host_status()
+            return False
+        self._host_participant = participant
+        self._host_cert = cert
+        self._host_client = LocalSessionClient(self._session, participant)
+        self._log_message(f"Вы в сессии как {cert.display_name} (организатор)")
+        self._set_host_status()
+        return True
+
+    def _reload_certificates(self) -> None:
+        self._certs.reload()
+        if self._host_cert is not None:
+            self._certs.select(self._host_cert, notify=False)
+        self._auto_join_host()
+        self._update_sign_button(self._session.snapshot())
+
+    def _on_host_cert_changed(self) -> None:
+        if self._host_worker is not None or self._host_signed:
+            return
+        cert = self._certs.selected()
+        if cert is None:
+            if self._host_cert is not None:
+                self._certs.select(self._host_cert, notify=False)
+            self._update_sign_button(self._session.snapshot())
+            return
+        if self._host_participant is None:
+            self._join_host(cert)
+        elif self._host_cert is None or cert.thumbprint != self._host_cert.thumbprint:
+            try:
+                self._session.update_host(
+                    network.certificate_payload(cert),
+                    token=self._host_participant.token,
+                )
+            except network.NetworkError as exc:
+                QMessageBox.warning(self, "Сертификат", str(exc))
+                self._certs.select(self._host_cert, notify=False)
             else:
-                self._sign.setText("Подписать документ")
-                self._sign.setEnabled(not snap["finished"])
-            return
+                self._host_cert = cert
+                self._log_message("Сертификат организатора изменён")
+        self._update_sign_button(self._session.snapshot())
 
     def _log_message(self, text: str) -> None:
         if not text:
@@ -820,30 +906,25 @@ class HostSessionDialog(QDialog):
         if self._session.snapshot()["finished"]:
             QMessageBox.information(self, "Подпись", "Сессия уже завершена.")
             return
-        if self._host_participant is None or self._host_cert is None:
-            dialog = HostCertificateDialog(self)
-            if dialog.exec() != QDialog.DialogCode.Accepted:
-                return
-            cert = dialog.selected()
-            if cert is None:
-                return
-            if self._host_participant is None:
-                try:
-                    participant = self._session.join_host(network.certificate_payload(cert))
-                except network.NetworkError as exc:
-                    QMessageBox.warning(self, "Подпись", str(exc))
-                    return
-                self._host_participant = participant
-                self._log_message(
-                    f"Вы в сессии как {cert.display_name} (организатор)"
-                )
-            self._host_cert = cert
+        if (
+            self._host_participant is None
+            or self._host_cert is None
+            or self._host_client is None
+        ):
+            QMessageBox.information(
+                self,
+                "Подпись",
+                "Выберите действующий сертификат в блоке «Ваш сертификат» — "
+                "им вы подпишете документ как организатор.",
+            )
+            return
         self._sign.setEnabled(False)
         self._sign.setText("Подписание…")
         self._finish.setEnabled(False)
-        self._host_worker = HostSignWorker(
-            self._session,
-            self._host_participant.token,
+        self._certs.setEnabled(False)
+        self._refresh_certs.setEnabled(False)
+        self._host_worker = ClientSignWorker(
+            self._host_client,
             self._host_cert.thumbprint,
             self._session.config.mode,
         )
@@ -857,14 +938,15 @@ class HostSessionDialog(QDialog):
         self._sign.setText("Подписание…")
         self._log_message(message)
 
-    def _on_host_signed(self, note: str) -> None:
+    def _on_host_signed(self) -> None:
         self._host_worker = None
+        self._host_signed = True
         self._finish.setEnabled(True)
         self._sign.setText("Подписано ✓")
         self._sign.setEnabled(False)
-        self._log_message(
-            "Подпись организатора добавлена" + (f" · {note}" if note else "")
-        )
+        self._certs.setEnabled(False)
+        self._refresh_certs.setEnabled(False)
+        self._log_message("Подпись организатора добавлена")
         self._tick()
         QMessageBox.information(
             self, "Готово",
@@ -876,8 +958,10 @@ class HostSessionDialog(QDialog):
         self._host_worker = None
         self._finish.setEnabled(True)
         self._sign.setText("Подписать документ")
-        self._sign.setEnabled(True)
+        self._certs.setEnabled(True)
+        self._refresh_certs.setEnabled(True)
         self._log_message(f"✗ {message}")
+        self._update_sign_button(self._session.snapshot())
         if "очеред" in message.lower():
             QMessageBox.information(self, "Очередь", message)
         else:
@@ -1009,6 +1093,10 @@ class HostSessionDialog(QDialog):
             )
         self._session.finalize(note)
         self._saved = True
+        self._timer.stop()
+        # Keep the server alive for a few seconds so participants can see the
+        # "session finished" state (or grab the archive), then release the port.
+        QTimer.singleShot(6000, self._server.shutdown)
         self.accept()
 
     def reject(self) -> None:
@@ -1150,6 +1238,9 @@ class JoinSessionDialog(QDialog):
         self._poll_failures = 0
         self._session_summary = ""
         self._download_available = False
+        self._host_lost_notified = False
+        self._finished_notified = False
+        self._removed_notified = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(22, 20, 22, 18)
@@ -1252,6 +1343,9 @@ class JoinSessionDialog(QDialog):
     # ------------------------------------------------------------ connection
     def _connect_session(self) -> None:
         self._poll_failures = 0
+        self._host_lost_notified = False
+        self._finished_notified = False
+        self._removed_notified = False
         try:
             candidate = network.SessionClient(self._address.text(), self._code.text())
         except network.NetworkError as exc:
@@ -1329,7 +1423,11 @@ class JoinSessionDialog(QDialog):
             self._conn_status.setToolTip(self._client.base_url)
         elif state == "lost":
             color = theme.ERROR
-            text = "Нет связи с организатором — проверьте сеть"
+            text = "Связь с организатором потеряна — сессия прервана"
+            self._conn_status.setToolTip("")
+        elif state == "finished":
+            color = theme.PRIMARY
+            text = "Сессия завершена организатором"
             self._conn_status.setToolTip("")
         else:
             color = theme.OUTLINE
@@ -1488,17 +1586,72 @@ class JoinSessionDialog(QDialog):
         if self._client is None:
             return
         try:
-            state = self._client.state()
+            state = self._client.state(timeout=2.0)
         except network.NetworkError:
             self._poll_failures += 1
             if self._poll_failures >= 2 and self._connection_state == "connected":
                 self._set_connection_state("lost")
+            if self._poll_failures >= 3 and not self._host_lost_notified:
+                self._host_lost_notified = True
+                self._finished_notified = True
+                self._timer.stop()
+                self._sign.setEnabled(False)
+                self._decline.setEnabled(False)
+                self._set_connection_state("lost")
+                QMessageBox.warning(
+                    self,
+                    "Сессия прервана",
+                    "Связь с организатором потеряна. Похоже, организатор закрыл "
+                    "сессию или компьютер недоступен — подписание невозможно.\n\n"
+                    "Попросите организатора создать новую сессию и присоединитесь "
+                    "снова.",
+                )
             return
         self._poll_failures = 0
-        if self._joined and self._connection_state != "connected":
+        if (
+            self._joined
+            and self._connection_state != "connected"
+            and not self._finished_notified
+        ):
             self._set_connection_state("connected")
         _fill_status_table(self._table, state, highlight_id=self._client.participant_id)
         self._update_download_state(state)
+
+        if state.get("finished"):
+            if not self._finished_notified:
+                self._finished_notified = True
+                self._timer.stop()
+                self._sign.setEnabled(False)
+                self._decline.setEnabled(False)
+                self._set_connection_state("finished")
+                note = str(state.get("finish_note") or "")
+                QMessageBox.information(
+                    self,
+                    "Сессия завершена",
+                    "Организатор завершил сессию." + (f"\n{note}" if note else ""),
+                )
+            return
+
+        ids = {item["id"] for item in state.get("participants", [])}
+        if (
+            self._joined
+            and self._worker is None
+            and self._client.participant_id
+            and self._client.participant_id not in ids
+        ):
+            if not self._removed_notified:
+                self._removed_notified = True
+                self._timer.stop()
+                QMessageBox.warning(
+                    self,
+                    "Сессия",
+                    "Организатор убрал вас из списка участников — связь "
+                    "прерывалась дольше допустимого.\n\n"
+                    "Присоединитесь к сессии заново.",
+                )
+                self._reset_connection()
+            return
+
         if self._joined and self._worker is None:
             for item in state.get("participants", []):
                 if item["id"] != self._client.participant_id:
@@ -1529,6 +1682,14 @@ class JoinSessionDialog(QDialog):
                     pass
             worker.terminate()
             worker.wait(2000)
+        if (
+            self._client is not None
+            and self._joined
+            and not self._signed
+            and not self._declined
+            and not self._finished_notified
+        ):
+            self._client.leave()
         super().reject()
 
 

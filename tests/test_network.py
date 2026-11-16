@@ -9,6 +9,7 @@ Run with:  python tests/test_network.py
 from __future__ import annotations
 
 import base64
+import hashlib
 import pathlib
 import sys
 
@@ -26,14 +27,22 @@ from asn1crypto import x509 as asn1x509  # noqa: E402
 from pdfsign import crypto, network, pdf as pdfmod  # noqa: E402
 
 
-def make_test_cms(content: bytes) -> bytes:
-    """Parseable SignedData whose messageDigest equals Streebog-256(content)."""
-    digest = bytes(crypto.streebog256(content))
-    assert digest, "gostcrypto недоступен"
+DIGEST_OIDS = {
+    "streebog256": "1.2.643.7.1.1.2.2",
+    "streebog512": "1.2.643.7.1.1.2.3",
+    "sha256": "2.16.840.1.101.3.4.2.1",
+}
+
+
+def make_test_cms(content: bytes, digest: str = "streebog256") -> bytes:
+    """Parseable SignedData whose messageDigest matches the chosen algorithm."""
+    oid = DIGEST_OIDS[digest]
+    value = crypto.digest_for_oid(oid, content)
+    assert value, f"нет реализации {digest}"
     signed_attrs = asn1cms.CMSAttributes([
         asn1cms.CMSAttribute({
             "type": asn1cms.CMSAttributeType("message_digest"),
-            "values": [digest],
+            "values": [value],
         }),
     ])
     signer_info = asn1cms.SignerInfo({
@@ -44,7 +53,7 @@ def make_test_cms(content: bytes) -> bytes:
                 "serial_number": asncore.Integer(1),
             }),
         }),
-        "digest_algorithm": asn1algos.DigestAlgorithm({"algorithm": "sha256"}),
+        "digest_algorithm": asn1algos.DigestAlgorithm({"algorithm": oid}),
         "signed_attrs": signed_attrs,
         "signature_algorithm": asn1algos.SignedDigestAlgorithm(
             {"algorithm": "rsassa_pkcs1v15"}
@@ -53,7 +62,7 @@ def make_test_cms(content: bytes) -> bytes:
     })
     signed_data = asn1cms.SignedData({
         "version": asn1cms.CMSVersion(3),
-        "digest_algorithms": [asn1algos.DigestAlgorithm({"algorithm": "sha256"})],
+        "digest_algorithms": [asn1algos.DigestAlgorithm({"algorithm": oid})],
         "encap_content_info": asn1cms.EncapsulatedContentInfo({
             "content_type": asn1cms.ContentType("data"),
             "content": b"",
@@ -95,10 +104,9 @@ def check_final_document(data: bytes, expected: int, failures: list[str]) -> Non
     if fields and not fields[-1].covers_whole_file:
         failures.append("последняя подпись должна покрывать весь файл")
     for field in fields:
-        digest = crypto.cms_message_digest(field.contents)
-        actual = crypto.streebog256(field.signed_bytes)
-        if digest is None or actual is None or bytes(digest) != bytes(actual):
-            failures.append(f"{field.field_name}: хеш подписи не совпадает с подписанными байтами")
+        status, note = crypto.cms_digest_status(field.contents, field.signed_bytes)
+        if status is not True:
+            failures.append(f"{field.field_name}: {note}")
 
 
 def test_sequential(source: bytes, failures: list[str]) -> None:
@@ -185,6 +193,21 @@ def test_sequential(source: bytes, failures: list[str]) -> None:
         if statuses.get(third.participant_id) != network.STATUS_DECLINED:
             failures.append("статус должен быть declined")
 
+        # polling with a token refreshes presence, so the participant is not pruned
+        first_participant = session._by_pid(first.participant_id)
+        first_participant.last_seen -= network.PARTICIPANT_TIMEOUT + 1
+        state = first.state()
+        if not any(p["id"] == first.participant_id for p in state["participants"]):
+            failures.append("опрос состояния должен продлевать присутствие участника")
+
+        # a clean close removes the waiting participant from the list
+        leaver = network.SessionClient(base, code)
+        leaver.join(StubCert("Уходит", "DD44"))
+        leaver.leave()
+        state = first.state()
+        if any(p["id"] == leaver.participant_id for p in state["participants"]):
+            failures.append("участник, закрывший окно, остался в списке")
+
         check_final_document(session.document_bytes(), 2, failures)
         document, sig_files, note = session.results()
         if sig_files:
@@ -229,10 +252,9 @@ def test_parallel(source: bytes, failures: list[str]) -> None:
                 failures.append(f"имя файла подписи должно оканчиваться на .pdf.sig: {name}")
             if "_" not in name:
                 failures.append(f"в имени подписи должен быть участник: {name}")
-            digest = crypto.cms_message_digest(cms)
-            actual = crypto.streebog256(source)
-            if bytes(digest) != bytes(actual):
-                failures.append(f"{name}: хеш .sig не соответствует исходному документу")
+            status, note = crypto.cms_digest_status(cms, source)
+            if status is not True:
+                failures.append(f"{name}: {note}")
 
         # финальный архив: документ + .sig каждого + протокол
         import io
@@ -470,21 +492,117 @@ def test_host_signing(source: bytes, failures: list[str]) -> None:
         pass
 
 
+def test_digest_algorithms(source: bytes, failures: list[str]) -> None:
+    """A CMS is checked with its own digest algorithm, not always Streebog-256."""
+    for name in ("streebog256", "streebog512", "sha256"):
+        cms = make_test_cms(source, name)
+        if name == "sha256":
+            expected = hashlib.sha256(source).digest()
+            if crypto.cms_message_digest(cms) != expected:
+                failures.append("SHA-256 CMS собран неверно")
+        status, note = crypto.cms_digest_status(cms, source)
+        if status is not True:
+            failures.append(f"{name}: {note}")
+        ok, note = network.verify_cms_digest(cms, source)
+        if not ok:
+            failures.append(f"{name}: подпись не принята — {note}")
+        ok, note = network.verify_cms_digest(cms, source + b"\x00")
+        if ok:
+            failures.append(f"{name}: подмена данных не обнаружена")
+        elif "НЕ совпадает" not in note:
+            failures.append(f"{name}: неинформативное сообщение о несовпадении: {note}")
+
+
+def test_presence(source: bytes, failures: list[str]) -> None:
+    """Disconnected participants are pruned; signed ones and the host stay."""
+    session = network.SignSession(
+        source, network.SessionConfig(mode=network.MODE_SEQUENTIAL, doc_name="test.pdf")
+    )
+    first = session.join({"name": "Первый", "thumbprint": "P1"})[0]
+    second = session.join({"name": "Второй", "thumbprint": "P2"})[0]
+    if [p["name"] for p in session.snapshot()["participants"]] != ["Первый", "Второй"]:
+        failures.append("порядок участников после присоединения неверен")
+
+    first.last_seen -= network.PARTICIPANT_TIMEOUT + 1
+    snap = session.snapshot()
+    if [p["name"] for p in snap["participants"]] != ["Второй"]:
+        failures.append(f"отключившийся участник не удалён: {snap['participants']}")
+    if [p["order"] for p in snap["participants"]] != [1]:
+        failures.append("после удаления порядковые номера не перенумерованы")
+
+    session.leave(second.token)
+    if session.snapshot()["participants"]:
+        failures.append("участник, вышедший из сессии, остался в списке")
+
+    keep = session.join({"name": "Третий", "thumbprint": "P3"})[0]
+    signed, _version = session.prepare_signature(keep.token)
+    session.commit_signature(keep.token, make_test_cms(signed))
+    keep.last_seen -= network.PARTICIPANT_TIMEOUT + 1
+    if not any(p["id"] == keep.pid for p in session.snapshot()["participants"]):
+        failures.append("подписавший участник не должен исчезать из списка")
+    session.leave(keep.token)
+    if not any(p["id"] == keep.pid for p in session.snapshot()["participants"]):
+        failures.append("подписавший участник не должен удаляться при выходе")
+
+    host = session.join_host({"name": "Организатор", "thumbprint": "H1"})
+    host.last_seen -= network.PARTICIPANT_TIMEOUT + 1
+    if not any(p["id"] == host.pid for p in session.snapshot()["participants"]):
+        failures.append("организатор не должен удаляться по таймауту")
+
+
+def test_host_update(source: bytes, failures: list[str]) -> None:
+    """The organizer can change its certificate before signing."""
+    session = network.SignSession(
+        source, network.SessionConfig(mode=network.MODE_SEQUENTIAL, doc_name="test.pdf")
+    )
+    host = session.join_host({"name": "Старый Организатор", "thumbprint": "H1"})
+    session.join({"name": "Участник", "thumbprint": "P1"})
+    session.update_host(
+        {"name": "Новый Организатор", "organization": "ООО «Новое»", "thumbprint": "H2"},
+        token=host.token,
+    )
+    row = next(
+        p for p in session.snapshot()["participants"] if p["id"] == host.pid
+    )
+    if row["name"] != "Новый Организатор" or row["organization"] != "ООО «Новое»":
+        failures.append(f"сертификат организатора не обновился: {row}")
+
+    try:
+        session.update_host({"name": "Дубль", "thumbprint": "P1"}, token=host.token)
+        failures.append("нельзя занять сертификат участника")
+    except network.NetworkError:
+        pass
+
+    signed, _version = session.prepare_signature(host.token)
+    session.commit_signature(host.token, make_test_cms(signed))
+    try:
+        session.update_host({"name": "Поздно", "thumbprint": "H3"}, token=host.token)
+        failures.append("после подписи менять сертификат организатора нельзя")
+    except network.NetworkError:
+        pass
+
+
 def main() -> int:
     source = find_fixture().read_bytes()
     failures: list[str] = []
     test_helpers(failures)
+    test_digest_algorithms(source, failures)
     test_sequential(source, failures)
     test_parallel(source, failures)
     test_strict_order(source, failures)
     test_order(source, failures)
     test_host_signing(source, failures)
+    test_presence(source, failures)
+    test_host_update(source, failures)
     if failures:
         print("FAILED")
         for failure in failures:
             print("  -", failure)
         return 1
-    print("OK: последовательный и параллельный режимы, очередь, отказы, .sig, подпись организатора")
+    print(
+        "OK: режимы, очередь, отказы, .sig, подпись организатора, алгоритмы "
+        "дайджеста, отключение участников"
+    )
     return 0
 
 

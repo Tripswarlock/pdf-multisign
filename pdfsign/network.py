@@ -29,6 +29,7 @@ import re
 import secrets
 import socket
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -43,6 +44,10 @@ PORT_ATTEMPTS = 20
 JOIN_CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
 MAX_BODY = 32 * 1024 * 1024
 HTTP_TIMEOUT = 15
+# A participant polls /api/state every 2 s.  Five missed polls in a row mean the
+# computer is gone (closed window, network drop, crashed app), so the row is
+# removed from the session.
+PARTICIPANT_TIMEOUT = 10.0
 
 MODE_SEQUENTIAL = "sequential"
 MODE_PARALLEL = "parallel"
@@ -98,6 +103,7 @@ class Participant:
     signed_at: str = ""
     sig_b64: str = ""  # parallel mode only: detached CMS
     is_host: bool = False  # the organizer joining with its own certificate
+    last_seen: float = field(default_factory=time.monotonic)
 
     @property
     def cert_info(self) -> "RemoteCertificate":
@@ -230,21 +236,18 @@ def normalize_base_url(base_url: str, default_port: int = DEFAULT_PORT) -> str:
 
 
 def verify_cms_digest(cms: bytes, data: bytes) -> tuple[bool, str]:
-    """Check that the CMS messageDigest matches the given bytes."""
-    expected = crypto.cms_message_digest(cms)
-    if expected is None:
-        # No signed attribute to compare: fall back to the provider itself, so a
-        # CMS without messageDigest cannot pass as valid unchecked.
-        ok, note = crypto.verify_detached(cms, data)
-        if ok:
-            return True, f"подпись проверена CryptoPro ({note})"
-        return False, "в подписи нет атрибута messageDigest — проверить не удалось"
-    actual = crypto.streebog256(data)
-    if actual is None:
-        return True, "локальный ГОСТ-хеш недоступен — дайджест не проверялся"
-    if expected == actual:
-        return True, "ГОСТ-хеш совпадает с подписанным значением"
-    return False, "подпись создана над другими данными (дайджест не совпадает)"
+    """Check the CMS digest against the given bytes using its own algorithm."""
+    status, note = crypto.cms_digest_status(cms, data)
+    if status is True:
+        return True, note
+    if status is False:
+        return False, note
+    # The algorithm is unknown locally (or its implementation is missing): ask
+    # CryptoPro, so a CMS without a model digest cannot pass unchecked.
+    ok, provider_note = crypto.verify_detached(cms, data)
+    if ok:
+        return True, f"подпись проверена CryptoPro ({note}; {provider_note})"
+    return False, f"не удалось проверить подпись: {note}; CryptoPro: {provider_note}"
 
 
 class SignSession:
@@ -286,6 +289,54 @@ class SignSession:
             participant = self._by_pid(pid)
             return participant.cert_info if participant else None
 
+    # ------------------------------------------------------------ presence
+    def touch(self, token: str) -> bool:
+        """Mark a participant as alive (called on every authenticated request)."""
+        with self._lock:
+            participant = self._by_token(token)
+            if participant is None:
+                return False
+            participant.last_seen = time.monotonic()
+            return True
+
+    def _renumber_locked(self) -> None:
+        for index, participant in enumerate(
+            sorted(self._participants, key=lambda p: p.order), start=1
+        ):
+            participant.order = index
+
+    def _prune_locked(self) -> None:
+        """Drop participants that stopped polling (closed window / network drop).
+
+        Signed and declined participants stay: their signatures are part of the
+        result and their rows belong in the protocol.  The organizer is local and
+        is never pruned.
+        """
+        if not self._participants:
+            return
+        now = time.monotonic()
+        keep: list[Participant] = []
+        dropped = False
+        for participant in self._participants:
+            if participant.is_host or participant.status in (
+                STATUS_SIGNED,
+                STATUS_DECLINED,
+            ):
+                keep.append(participant)
+                continue
+            if now - participant.last_seen > PARTICIPANT_TIMEOUT:
+                dropped = True
+                continue
+            keep.append(participant)
+        if not dropped:
+            return
+        self._participants = keep
+        if self._pending is not None:
+            token = self._pending[0]
+            if not any(secrets.compare_digest(p.token, token) for p in keep):
+                self._pending = None
+        self._renumber_locked()
+
     def document_bytes(self) -> bytes:
         with self._lock:
             return self._doc if self.config.mode == MODE_SEQUENTIAL else self._original
@@ -293,13 +344,16 @@ class SignSession:
     def document_for(self, token: str) -> tuple[bytes, int]:
         """Document bytes + version for an authenticated participant."""
         with self._lock:
-            if self._by_token(token) is None:
+            participant = self._by_token(token)
+            if participant is None:
                 raise NetworkError("Участник не найден — сначала присоединитесь к сессии")
+            participant.last_seen = time.monotonic()
             data = self._doc if self.config.mode == MODE_SEQUENTIAL else self._original
             return data, self.version
 
     def snapshot(self) -> dict:
         with self._lock:
+            self._prune_locked()
             return {
                 "app": "PDF Мультиподпись",
                 "version": __version__,
@@ -328,6 +382,7 @@ class SignSession:
         if not name:
             raise NetworkError("Не указано имя участника")
         with self._lock:
+            self._prune_locked()
             if self.finished:
                 raise NetworkError("Сессия завершена")
             if len(self._participants) >= 50:
@@ -355,17 +410,18 @@ class SignSession:
             return participant, self.version
 
     def join_host(self, info: dict) -> Participant:
-        """Register the organizer as a signer with its own certificate.
+        """Register the organizer as an equal signer with its own certificate.
 
-        The organizer joins at the end of the queue, so a running session is not
-        disturbed; its row can then be moved like any other participant's.  The
-        returned token is used exactly like a participant token for
-        ``prepare_signature``/``commit_signature`` or ``submit_signature``.
+        When the organizer joins at session start (the normal case) the list is
+        empty and the host becomes participant #1.  The returned token is used
+        exactly like a participant token for ``prepare_signature`` /
+        ``commit_signature`` or ``submit_signature``.
         """
         name = str(info.get("name") or "").strip()
         if not name:
             raise NetworkError("Не удалось определить имя из сертификата организатора")
         with self._lock:
+            self._prune_locked()
             if self.finished:
                 raise NetworkError("Сессия завершена")
             if self.host_pid:
@@ -396,6 +452,54 @@ class SignSession:
             self.host_pid = participant.pid
             return participant
 
+    def update_host(self, info: dict, *, token: str) -> Participant:
+        """Change the organizer's certificate before it signs."""
+        name = str(info.get("name") or "").strip()
+        if not name:
+            raise NetworkError("Не удалось определить имя из сертификата организатора")
+        with self._lock:
+            participant = self._by_token(token)
+            if participant is None or not participant.is_host:
+                raise NetworkError("Организатор не найден в сессии")
+            if participant.status in (STATUS_SIGNED, STATUS_DECLINED):
+                raise NetworkError("Подпись уже завершена — сертификат изменить нельзя")
+            if self._pending is not None and secrets.compare_digest(
+                self._pending[0], token
+            ):
+                raise NetworkError("Подпись уже готовится — дождитесь завершения")
+            thumb = str(info.get("thumbprint") or "").strip().upper()
+            if thumb and any(
+                p is not participant
+                and p.thumbprint == thumb
+                and p.status != STATUS_DECLINED
+                for p in self._participants
+            ):
+                raise NetworkError("Этот сертификат уже участвует в сессии")
+            participant.name = name
+            participant.organization = str(info.get("organization") or "").strip()
+            participant.position = str(info.get("position") or "").strip()
+            participant.cert_name = str(info.get("cert_name") or "").strip()
+            participant.validity_text = str(info.get("validity_text") or "").strip()
+            participant.serial = str(info.get("serial") or "").strip()
+            participant.thumbprint = thumb
+            participant.last_seen = time.monotonic()
+            return participant
+
+    def leave(self, token: str) -> None:
+        """Remove a waiting participant immediately (clean window close)."""
+        with self._lock:
+            participant = self._by_token(token)
+            if participant is None or participant.is_host:
+                return
+            if participant.status in (STATUS_SIGNED, STATUS_DECLINED):
+                return
+            self._participants.remove(participant)
+            if self._pending is not None and secrets.compare_digest(
+                self._pending[0], token
+            ):
+                self._pending = None
+            self._renumber_locked()
+
     def set_status(self, token: str, status: str, detail: str = "") -> None:
         if status not in (STATUS_PENDING, STATUS_SIGNING, STATUS_ERROR):
             raise NetworkError(f"Статус «{status}» нельзя установить участником")
@@ -405,6 +509,7 @@ class SignSession:
                 raise NetworkError("Участник не найден — возможно, сессию перезапустили")
             if participant.status in (STATUS_SIGNED, STATUS_DECLINED):
                 raise NetworkError("Подпись уже завершена")
+            participant.last_seen = time.monotonic()
             participant.status = status
             participant.detail = detail.strip()
 
@@ -413,6 +518,7 @@ class SignSession:
             participant = self._by_token(token)
             if participant is None:
                 raise NetworkError("Участник не найден")
+            participant.last_seen = time.monotonic()
             participant.status = STATUS_DECLINED
             participant.detail = reason.strip()
             participant.signed_at = _now()
@@ -500,6 +606,7 @@ class SignSession:
     def prepare_signature(self, token: str) -> tuple[bytes, int]:
         """Reserve a revision; returns the exact bytes the client must sign."""
         with self._lock:
+            self._prune_locked()
             if self.config.mode != MODE_SEQUENTIAL:
                 raise NetworkError(
                     "Сессия открыта в режиме соподписи: подпись отправляется "
@@ -508,6 +615,7 @@ class SignSession:
             participant = self._by_token(token)
             if participant is None:
                 raise NetworkError("Участник не найден — сначала присоединитесь к сессии")
+            participant.last_seen = time.monotonic()
             if self.finished:
                 raise NetworkError("Сессия завершена")
             if participant.status in (STATUS_SIGNED, STATUS_DECLINED):
@@ -573,6 +681,7 @@ class SignSession:
             participant = self._by_token(token)
             if participant is None:
                 raise NetworkError("Участник не найден — возможно, сессию перезапустили")
+            participant.last_seen = time.monotonic()
             if self._pending is None or self._pending[0] != token:
                 raise NetworkError(
                     "Подготовленная подпись не найдена — начните подписание заново"
@@ -602,9 +711,11 @@ class SignSession:
 
     def cancel_pending(self, token: str) -> None:
         with self._lock:
+            participant = self._by_token(token)
+            if participant is not None:
+                participant.last_seen = time.monotonic()
             if self._pending is not None and self._pending[0] == token:
                 self._pending = None
-                participant = self._by_token(token)
                 if participant is not None and participant.status == STATUS_SIGNING:
                     participant.status = STATUS_PENDING
                     participant.detail = ""
@@ -620,6 +731,7 @@ class SignSession:
                 raise NetworkError("Участник не найден — возможно, сессию перезапустили")
             if participant.status in (STATUS_SIGNED, STATUS_DECLINED):
                 raise NetworkError("Вы уже завершили подписание этого документа")
+            participant.last_seen = time.monotonic()
             if self.finished:
                 raise NetworkError("Сессия завершена")
             if self.config.mode != MODE_PARALLEL:
@@ -865,6 +977,9 @@ def _make_handler(session: SignSession) -> type[BaseHTTPRequestHandler]:
                     return
                 if path == "/api/state":
                     self._check_code(params)
+                    token = (self.headers.get("X-Token") or "").strip()
+                    if token:
+                        session.touch(token)
                     self._json({"ok": True, **session.snapshot()})
                     return
                 if path == "/api/document":
@@ -926,6 +1041,7 @@ def _make_handler(session: SignSession) -> type[BaseHTTPRequestHandler]:
                     return
                 body = self._body()
                 token = self._token()
+                session.touch(token)
                 if path == "/api/status":
                     status = str(body.get("status") or "")
                     detail = str(body.get("detail") or "")
@@ -934,6 +1050,10 @@ def _make_handler(session: SignSession) -> type[BaseHTTPRequestHandler]:
                     return
                 if path == "/api/decline":
                     session.decline(token, str(body.get("reason") or ""))
+                    self._json({"ok": True})
+                    return
+                if path == "/api/leave":
+                    session.leave(token)
                     self._json({"ok": True})
                     return
                 if path == "/api/prepare":
@@ -1092,8 +1212,11 @@ class SessionClient:
         if not self.token:
             raise NetworkError("Сервер не выдал токен участника")
 
-    def state(self) -> dict:
-        raw, _, _ = self._request(f"/api/state?code={self.code}")
+    def state(self, timeout: float = 3.0) -> dict:
+        headers = {"X-Token": self.token} if self.token else None
+        raw, _, _ = self._request(
+            f"/api/state?code={self.code}", headers=headers, timeout=timeout
+        )
         return json.loads(raw.decode("utf-8"))
 
     def document(self) -> tuple[bytes, int]:
@@ -1139,6 +1262,17 @@ class SessionClient:
 
     def decline(self, reason: str = "") -> None:
         self._request("/api/decline", {"reason": reason}, headers={"X-Token": self.token})
+
+    def leave(self) -> None:
+        """Tell the host that this participant closed the window."""
+        if not self.token:
+            return
+        try:
+            self._request(
+                "/api/leave", {}, headers={"X-Token": self.token}, timeout=2.0
+            )
+        except NetworkError:
+            pass
 
     def package(self) -> tuple[str, bytes]:
         """Parallel mode: download the final ZIP (document + .sig files)."""

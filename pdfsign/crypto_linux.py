@@ -13,7 +13,12 @@ import shutil
 import subprocess
 import tempfile
 
-from .crypto import CertificateInfo, CryptoError, cms_message_digest, parse_dn, streebog256
+from .crypto import (
+    CertificateInfo,
+    CryptoError,
+    cms_digest_status,
+    parse_dn,
+)
 
 CRYPTOPRO_ROOTS = ("/opt/cprocsp/bin/amd64", "/opt/cprocsp/bin/aarch64", "/opt/cprocsp/bin")
 
@@ -282,13 +287,10 @@ def sign_detached(
 
 
 def _assert_digest(cms: bytes, content: bytes) -> None:
-    expected = cms_message_digest(cms)
-    actual = streebog256(content)
-    if expected is None or actual is None:
-        return
-    if expected != actual:
+    status, note = cms_digest_status(cms, content)
+    if status is False:
         raise CryptoError(
-            "cryptcp подписал не байты документа (несовпадение ГОСТ-хеша). "
+            "cryptcp подписал не байты документа: " + note + ". "
             "Проверьте параметры cryptcp -der / -detach.",
             "CMS_DIGEST_MISMATCH",
         )
@@ -296,19 +298,14 @@ def _assert_digest(cms: bytes, content: bytes) -> None:
 
 def verify_detached(cms: bytes, content: bytes) -> tuple[bool, str]:
     tool = cryptcp_path()
-    digest_ok = False
-    expected = cms_message_digest(cms)
-    actual = streebog256(content)
-    if expected is not None and actual is not None:
-        digest_ok = expected == actual
+    status, digest_note = cms_digest_status(cms, content)
+    digest_ok = status is True
 
     if not tool:
-        if expected is not None and actual is not None:
-            return digest_ok, (
-                "ГОСТ-хеш документа совпадает с подписанным"
-                if digest_ok
-                else "ГОСТ-хеш документа НЕ совпадает с подписанным"
-            )
+        if status is True:
+            return True, digest_note
+        if status is False:
+            return False, digest_note
         return False, "cryptcp не найден — проверка подписи недоступна"
 
     with tempfile.TemporaryDirectory(prefix="pdfmultisign-verify-") as directory:
@@ -322,10 +319,15 @@ def verify_detached(cms: bytes, content: bytes) -> tuple[bool, str]:
             [tool, "-verify", "-detach", signature_path, input_path], timeout=120
         )
         if code == 0:
-            return True, "Подпись верна (проверено cryptcp CryptoPro CSP)"
+            note = "Подпись верна (проверено cryptcp CryptoPro CSP)"
+            if digest_ok:
+                note += f"; {digest_note}"
+            return True, note
         if digest_ok:
             return True, (
-                "ГОСТ-хеш документа совпадает с подписанным; "
-                f"cryptcp недоступен для полной проверки: {output.strip()[:120]}"
+                digest_note
+                + f"; cryptcp недоступен для полной проверки: {output.strip()[:120]}"
             )
+        if status is False:
+            return False, digest_note
         return False, f"cryptcp: {output.strip()[:200]}"

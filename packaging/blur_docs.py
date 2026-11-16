@@ -25,8 +25,11 @@ REGIONS: dict[str, list[tuple[int, int, int, int]]] = {
         (730, 670, 1168, 742),    # log line «Signature2 — <signer>»
         (488, 588, 648, 726),     # tiny visible signature blocks in the preview
     ],
+    "session-host.png": [
+        (48, 305, 710, 448),      # certificate rows of the organizer
+    ],
     "session-join.png": [
-        (48, 320, 708, 454),      # certificate rows (name, org, validity)
+        (48, 308, 710, 448),      # certificate rows (name, org, validity)
     ],
     "signature-block.png": [
         (883, 608, 1172, 890),    # both visible signature stamps on the page
