@@ -66,15 +66,6 @@ pdf-multisign
 
 ![Сетевая сессия: выбор роли](docs/session-role.png)
 
-![Сетевая сессия: параметры](docs/session-setup.png)
-
-![Сетевая сессия: окно организатора](docs/session-host.png)
-
-![Сетевая сессия: окно участника](docs/session-join.png)
-
-![Сборка на Astra Linux](docs/astra-ui.png)
-
-![Блок подписи](docs/signature-block.png)
 
 ## Сетевая подпись по ЛВС
 
