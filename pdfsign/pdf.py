@@ -77,6 +77,31 @@ class SignResult:
 
 
 @dataclass
+class PendingSignature:
+    """A revision prepared for signing: the /Contents placeholder is zeroed.
+
+    ``signed_bytes`` are the two /ByteRange segments concatenated — exactly
+    the bytes a signer must feed into the detached CMS.  ``commit`` inserts
+    the CMS hex into the placeholder and returns the final revision.
+    """
+
+    data: bytes
+    signed_bytes: bytes
+    field_name: str
+    _hex_start: int = 0
+
+    def commit(self, cms: bytes) -> bytes:
+        if not cms:
+            raise PdfSignError("Получена пустая подпись", "SIGNING_EMPTY")
+        if len(cms) * 2 > CONTENTS_HEX_LENGTH:
+            raise PdfSignError("CMS не помещается в контейнер подписи", "CMS_TOO_LARGE")
+        buffer = bytearray(self.data)
+        payload = cms.hex().upper().encode("ascii").ljust(CONTENTS_HEX_LENGTH, b"0")
+        buffer[self._hex_start : self._hex_start + CONTENTS_HEX_LENGTH] = payload
+        return bytes(buffer)
+
+
+@dataclass
 class PdfField:
     index: int
     field_name: str
@@ -292,16 +317,16 @@ def _pdf_timestamp() -> str:
     return now.strftime("D:%Y%m%d%H%M%S")
 
 
-def append_signature(
+def prepare_signature(
     pdf: bytes,
     request: SignRequest,
-    sign: Callable[[bytes], bytes],
     *,
     field_name: str,
-) -> SignResult:
-    """Append one signature revision to ``pdf``.
+) -> PendingSignature:
+    """Build a new revision with a zeroed /Contents placeholder.
 
-    ``sign`` receives the exact bytes that must be covered by the CMS.
+    The caller signs :attr:`PendingSignature.signed_bytes` and then commits the
+    CMS with :meth:`PendingSignature.commit`.
     """
     if not pdf.startswith(b"%PDF-"):
         raise PdfSignError("Исходные данные не являются PDF", "NOT_A_PDF")
@@ -473,19 +498,33 @@ def append_signature(
     buffer[ranges_position : ranges_position + len(ranges)] = ranges
 
     signed_bytes = bytes(buffer[:gap_start]) + bytes(buffer[gap_end:])
-    cms = sign(signed_bytes)
-    if not cms:
-        raise PdfSignError("CryptoPro вернул пустую подпись", "SIGNING_EMPTY")
-    if len(cms) * 2 > CONTENTS_HEX_LENGTH:
-        raise PdfSignError("CMS не помещается в контейнер подписи", "CMS_TOO_LARGE")
-    hex_payload = cms.hex().upper().encode("ascii").ljust(CONTENTS_HEX_LENGTH, b"0")
-    buffer[hex_start : hex_start + CONTENTS_HEX_LENGTH] = hex_payload
-
-    return SignResult(
-        output=bytes(buffer),
+    return PendingSignature(
+        data=bytes(buffer),
+        signed_bytes=signed_bytes,
         field_name=field_name,
+        _hex_start=hex_start,
+    )
+
+
+def append_signature(
+    pdf: bytes,
+    request: SignRequest,
+    sign: Callable[[bytes], bytes],
+    *,
+    field_name: str,
+) -> SignResult:
+    """Append one signature revision to ``pdf``.
+
+    ``sign`` receives the exact bytes that must be covered by the CMS.
+    """
+    pending = prepare_signature(pdf, request, field_name=field_name)
+    cms = sign(pending.signed_bytes)
+    output = pending.commit(cms)
+    return SignResult(
+        output=output,
+        field_name=pending.field_name,
         cms_size=len(cms),
-        coverage=len(signed_bytes),
+        coverage=len(pending.signed_bytes),
     )
 
 

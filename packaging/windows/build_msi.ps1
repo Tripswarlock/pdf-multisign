@@ -1,7 +1,7 @@
 # Build the Windows MSI installer with WiX Toolset 3.14.
 # Usage: powershell -ExecutionPolicy Bypass -File packaging\windows\build_msi.ps1
 param(
-    [string]$Version = "1.0.0",
+    [string]$Version = "1.1.0",
     [string]$OutDir = "dist"
 )
 
@@ -51,3 +51,4 @@ finally {
 
 $size = [math]::Round((Get-Item $msi).Length / 1MB, 1)
 Write-Host "собран $msi ($size МБ)"
+

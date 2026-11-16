@@ -372,6 +372,28 @@ class MainWindow(QMainWindow):
         self._reload.clicked.connect(self._load_certificates)
         cert_layout.addWidget(self._reload, 0, Qt.AlignmentFlag.AlignLeft)
 
+        net_card, net_layout = _card("Сетевая подпись (ЛВС)")
+        _shadow(net_card)
+        net_hint = QLabel(
+            "Несколько компьютеров подписывают один документ: здесь создаётся "
+            "сессия, остальные присоединяются по адресу и коду"
+        )
+        net_hint.setObjectName("Caption")
+        net_hint.setWordWrap(True)
+        net_layout.addWidget(net_hint)
+        net_buttons = QHBoxLayout()
+        self._host_button = QPushButton("Создать сессию…")
+        self._host_button.setObjectName("Tonal")
+        self._host_button.setEnabled(False)
+        self._host_button.clicked.connect(self._open_host_session)
+        self._join_button = QPushButton("Присоединиться…")
+        self._join_button.setObjectName("Text")
+        self._join_button.clicked.connect(self._open_join_session)
+        net_buttons.addWidget(self._host_button)
+        net_buttons.addWidget(self._join_button)
+        net_buttons.addStretch(1)
+        net_layout.addLayout(net_buttons)
+
         options_card, opt_layout = _card("Параметры подписи")
         _shadow(options_card)
         self._visible = QCheckBox("Видимый блок подписи на странице")
@@ -427,6 +449,7 @@ class MainWindow(QMainWindow):
         opt_layout.addWidget(self._save_button)
 
         layout.addWidget(cert_card, 1)
+        layout.addWidget(net_card, 0)
         layout.addWidget(options_card, 0)
 
         scroll = QScrollArea()
@@ -492,6 +515,7 @@ class MainWindow(QMainWindow):
         selected = self._selected()
         ready = self._pdf_data is not None and bool(selected)
         self._sign_button.setEnabled(ready)
+        self._host_button.setEnabled(self._pdf_data is not None)
         if not selected:
             self._status.setText("Выберите хотя бы один сертификат")
         elif self._pdf_data is None:
@@ -666,6 +690,38 @@ class MainWindow(QMainWindow):
             "PDF сохранён с подписями.\n\nПроверить подписи можно в Adobe Reader "
             "или штатными средствами CryptoPro.",
         )
+
+    # ------------------------------------------------------------- network
+    def _open_host_session(self) -> None:
+        if self._pdf_data is None:
+            QMessageBox.information(
+                self, "Сетевая сессия", "Сначала выберите PDF — он станет документом сессии."
+            )
+            return
+        from .netdialog import HostSessionDialog
+
+        name = self._pdf_path.name if self._pdf_path else "document.pdf"
+        dialog = HostSessionDialog(self._pdf_data, name, parent=self)
+        dialog.exec()
+        result = dialog.result_bytes
+        if result and result != self._pdf_data:
+            self._adopt_result(result, source="сетевая сессия")
+        self._refresh_state()
+
+    def _open_join_session(self) -> None:
+        from .netdialog import JoinSessionDialog
+
+        JoinSessionDialog(parent=self).exec()
+
+    def _adopt_result(self, data: bytes, source: str = "подписание") -> None:
+        """Adopt a new revision produced outside the local signing flow."""
+        self._pdf_data = data
+        self._output = data
+        self._save_button.setEnabled(True)
+        self._log_append(f"Документ обновлён ({source})")
+        total = len(service.describe_signatures(data))
+        self._status.setText(f"Подписей в документе: {total}. Можно сохранить или подписать ещё.")
+        self._show_page(self._preview_page)
 
     # ------------------------------------------------------------- events
     def _show_about(self) -> None:
