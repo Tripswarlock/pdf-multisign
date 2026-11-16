@@ -325,7 +325,7 @@ class HostSessionDialog(QDialog):
         self._session = session
         self._server = server
         self.setWindowTitle("Сетевая сессия — организатор")
-        self.resize(507, 640)
+        self.resize(700, 660)
         self.setStyleSheet(theme.stylesheet())
         self._saved = False
 
