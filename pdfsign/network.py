@@ -357,6 +357,11 @@ class SignSession:
     def prepare_signature(self, token: str) -> tuple[bytes, int]:
         """Reserve a revision; returns the exact bytes the client must sign."""
         with self._lock:
+            if self.config.mode != MODE_SEQUENTIAL:
+                raise NetworkError(
+                    "Сессия открыта в режиме соподписи: подпись отправляется "
+                    "целиком, без подготовки ревизии."
+                )
             participant = self._by_token(token)
             if participant is None:
                 raise NetworkError("Участник не найден — сначала присоединитесь к сессии")
@@ -416,6 +421,11 @@ class SignSession:
         """Verify the CMS against the prepared bytes and embed the revision."""
         if not cms:
             raise NetworkError("Пустая подпись")
+        if self.config.mode != MODE_SEQUENTIAL:
+            raise NetworkError(
+                "Сессия открыта в режиме соподписи: отправьте подпись через "
+                "«Подписать документ» ещё раз."
+            )
         with self._lock:
             participant = self._by_token(token)
             if participant is None:
@@ -471,10 +481,14 @@ class SignSession:
                 raise NetworkError("Сессия завершена")
             if self.config.mode != MODE_PARALLEL:
                 raise NetworkError("Этот режим сессии не принимает готовые подписи")
-            if int(doc_version) != self.version:
+            # In the parallel scheme every participant signs the immutable
+            # original, so the version is only advisory: 0 means the client did
+            # not see the X-Doc-Version header, which must not fail the signing.
+            version = int(doc_version or 0)
+            if version not in (0, self.version):
                 raise NetworkError(
-                    f"Документ обновился (версия {self.version}). "
-                    "Скачайте актуальную версию и подпишите её."
+                    f"Документ в сессии обновился до версии {self.version} "
+                    f"(у вас {version}). Скачайте документ заново и подпишите его."
                 )
             digest_ok, digest_note = verify_cms_digest(cms, self._original)
             if not digest_ok:
@@ -875,7 +889,14 @@ class SessionClient:
         raw, _, headers = self._request(
             f"/api/document?code={self.code}", headers={"X-Token": self.token}
         )
-        return raw, int(headers.get("X-Doc-Version") or 0)
+        version = int(headers.get("X-Doc-Version") or 0)
+        if version == 0:
+            # Some proxies/HTTP stacks drop custom headers: fall back to /api/state.
+            try:
+                version = int(self.state().get("doc_version") or 0)
+            except (NetworkError, TypeError, ValueError):
+                version = 0
+        return raw, version
 
     def prepare(self) -> bytes:
         """Sequential mode: reserve a revision and get the exact bytes to sign."""
@@ -910,8 +931,14 @@ class SessionClient:
 
     def submit(self, doc_version: int, cms: bytes) -> None:
         """Parallel mode: hand in a detached CMS for the .sig collection."""
+        version = int(doc_version or 0)
+        if version == 0:
+            try:
+                version = int(self.state().get("doc_version") or 0)
+            except (NetworkError, TypeError, ValueError):
+                version = 0
         self._request(
             "/api/sign",
-            {"doc_version": doc_version, "cms_b64": base64.b64encode(cms).decode("ascii")},
+            {"doc_version": version, "cms_b64": base64.b64encode(cms).decode("ascii")},
             headers={"X-Token": self.token},
         )
