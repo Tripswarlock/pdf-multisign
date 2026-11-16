@@ -198,6 +198,7 @@ class HostSetupDialog(QDialog):
         _shadow(card)
 
         self._parallel = QRadioButton("Параллельная подпись")
+        self._parallel.setChecked(True)
         card_layout.addWidget(self._parallel)
         par_hint = QLabel(
             "Каждый участник независимо подписывает исходный файл. Итог — "
@@ -208,7 +209,6 @@ class HostSetupDialog(QDialog):
         card_layout.addWidget(par_hint)
 
         self._sequential = QRadioButton("Последовательная подпись")
-        self._sequential.setChecked(True)
         card_layout.addWidget(self._sequential)
         seq_hint = QLabel(
             "Каждый участник подписывает актуальную версию документа, встраивая "
