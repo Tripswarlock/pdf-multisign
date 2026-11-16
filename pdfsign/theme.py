@@ -1,6 +1,30 @@
 """Material 3 inspired styling for the PDF multi-signature app."""
 from __future__ import annotations
 
+import os
+import sys
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_ROOT = os.path.dirname(_HERE)
+
+
+def _asset(name: str) -> str:
+    """Absolute path (POSIX slashes) of a bundled UI asset for Qt stylesheets."""
+    candidates = []
+    bundle = getattr(sys, "_MEIPASS", "")
+    if bundle:
+        candidates.append(os.path.join(bundle, "resources", name))
+    candidates.append(os.path.join(_ROOT, "resources", name))
+    candidates.append(os.path.join(_HERE, "resources", name))
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return candidate.replace("\\", "/")
+    return ""
+
+
+ARROW_DOWN = _asset("chevron-down.png")
+ARROW_DOWN_DISABLED = _asset("chevron-down-disabled.png")
+
 PRIMARY = "#1D4ED8"
 ON_PRIMARY = "#FFFFFF"
 PRIMARY_CONTAINER = "#DBEAFE"
@@ -106,11 +130,27 @@ def stylesheet() -> str:
         background: {SURFACE_CONTAINER_HIGH};
         border: 1px solid transparent;
         border-radius: 10px;
-        padding: 8px 12px;
+        padding: 8px 34px 8px 12px;
         min-height: 20px;
     }}
     QComboBox:hover {{ background: {SURFACE_VARIANT}; }}
-    QComboBox::drop-down {{ border: none; width: 24px; }}
+    QComboBox::drop-down {{
+        subcontrol-origin: padding;
+        subcontrol-position: center right;
+        width: 26px;
+        border: none;
+    }}
+    QComboBox::down-arrow {{
+        image: url("{ARROW_DOWN}");
+        width: 12px;
+        height: 12px;
+    }}
+    QComboBox:disabled {{
+        background: {SURFACE};
+        border: 1px dashed {OUTLINE_VARIANT};
+        color: {OUTLINE};
+    }}
+    QComboBox:disabled::down-arrow {{ image: url("{ARROW_DOWN_DISABLED}"); }}
     QComboBox QAbstractItemView {{
         background: {SURFACE};
         border: 1px solid {OUTLINE_VARIANT};
@@ -155,6 +195,24 @@ def stylesheet() -> str:
         image: url(none);
     }}
     QCheckBox::indicator:hover {{ border-color: {PRIMARY}; }}
+    QCheckBox:disabled {{ color: {OUTLINE}; }}
+    QCheckBox::indicator:disabled {{ border-color: {OUTLINE_VARIANT}; }}
+
+    QRadioButton {{ spacing: 10px; font-weight: 600; }}
+    QRadioButton::indicator {{
+        width: 20px; height: 20px;
+        border: 2px solid {ON_SURFACE_VARIANT};
+        border-radius: 12px;
+        background: transparent;
+    }}
+    QRadioButton::indicator:hover {{ border-color: {PRIMARY}; }}
+    QRadioButton::indicator:checked {{
+        border: 6px solid {PRIMARY};
+        background: {SURFACE};
+    }}
+    QRadioButton:disabled {{ color: {OUTLINE}; }}
+    QRadioButton::indicator:disabled {{ border-color: {OUTLINE_VARIANT}; }}
+    QRadioButton::indicator:checked:disabled {{ border: 6px solid {OUTLINE_VARIANT}; }}
 
     QProgressBar {{
         background: {SURFACE_VARIANT};

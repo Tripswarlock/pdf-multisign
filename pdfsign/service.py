@@ -11,6 +11,9 @@ from pypdf import PdfReader
 
 from . import crypto, pdf as pdfmod
 
+#: ``SignOptions.page_index`` sentinel: stamp every page of the document.
+ALL_PAGES = pdfmod.ALL_PAGES
+
 
 def store_label() -> str:
     """Human readable name of the certificate store for the current platform."""
@@ -143,9 +146,15 @@ def sign_document(
     sizes = page_sizes(data)
     if not sizes:
         return SignOutcome(output=data, error="PDF не содержит страниц")
-    page_index = options.page_index if options.page_index >= 0 else len(sizes) - 1
-    page_index = max(0, min(page_index, len(sizes) - 1))
-    page_width, page_height = sizes[page_index]
+    all_pages = options.page_index == ALL_PAGES
+    if all_pages:
+        page_index = ALL_PAGES
+        layout_index = 0
+    else:
+        page_index = options.page_index if options.page_index >= 0 else len(sizes) - 1
+        page_index = max(0, min(page_index, len(sizes) - 1))
+        layout_index = page_index
+    page_width, page_height = sizes[layout_index]
 
     rects = (
         stacked_rects(total + _existing_signature_count(data), page_width, page_height)[

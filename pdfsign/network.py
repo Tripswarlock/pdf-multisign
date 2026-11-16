@@ -346,9 +346,15 @@ class SignSession:
             data = self._doc
             existing = len(pdfmod.list_signatures(data))
             sizes = service.page_sizes(data)
-            page_index = self.config.page_index
-            page_index = page_index if 0 <= page_index < len(sizes) else len(sizes) - 1
-            page_width, page_height = sizes[page_index]
+            all_pages = self.config.page_index == pdfmod.ALL_PAGES
+            if all_pages:
+                page_index = pdfmod.ALL_PAGES
+            elif 0 <= self.config.page_index < len(sizes):
+                page_index = self.config.page_index
+            else:
+                page_index = len(sizes) - 1
+            layout_index = 0 if all_pages else page_index
+            page_width, page_height = sizes[layout_index]
             rect = None
             if self.config.visible:
                 rects = service.stacked_rects(existing + 1, page_width, page_height)

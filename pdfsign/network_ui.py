@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import crypto, network, service, theme
+from . import crypto, network, pdf as pdfmod, service, theme
 
 STATUS_COLORS = {
     network.STATUS_PENDING: "#B45309",
@@ -228,6 +228,7 @@ class HostSetupDialog(QDialog):
         self._page_combo.addItem("Последняя", -1)
         for index in range(page_count):
             self._page_combo.addItem(f"Страница {index + 1}", index)
+        self._page_combo.addItem("Все страницы", pdfmod.ALL_PAGES)
         page_row.addWidget(page_caption)
         page_row.addWidget(self._page_combo, 1)
         sub_layout.addLayout(page_row)

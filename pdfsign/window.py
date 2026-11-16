@@ -539,6 +539,7 @@ class MainWindow(QMainWindow):
         self._page_combo.addItem("Последняя", -1)
         for index in range(self._page_count):
             self._page_combo.addItem(f"Страница {index + 1}", index)
+        self._page_combo.addItem("Все страницы", service.ALL_PAGES)
         self._page_combo.blockSignals(False)
         self._show_page(self._preview_page)
         self._log_clear()

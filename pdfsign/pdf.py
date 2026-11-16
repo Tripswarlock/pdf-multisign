@@ -30,6 +30,9 @@ CONTENTS_HEX_LENGTH = 49152  # 24 KiB of CMS capacity, plenty for GOST CAdES-BES
 _NUMBER_WIDTH = 20
 _NEWLINE = b"\n"
 
+#: ``SignRequest.page_index`` sentinel: put a visible stamp on every page.
+ALL_PAGES = -2
+
 
 class PdfSignError(RuntimeError):
     def __init__(self, message: str, code: str = "PDF_SIGN_ERROR") -> None:
@@ -334,10 +337,20 @@ def prepare_signature(
     page_count = len(reader.pages)
     if page_count == 0:
         raise PdfSignError("PDF не содержит страниц", "EMPTY_PDF")
-    if request.page_index < 0 or request.page_index >= page_count:
-        raise PdfSignError("Неверный индекс страницы", "PAGE_OUT_OF_RANGE")
 
-    page = reader.pages[request.page_index]
+    # "all pages" puts the same stamp on every page: the primary page keeps the
+    # signature dictionary and field, the rest get the same appearance widget.
+    all_pages = request.page_index == ALL_PAGES
+    if all_pages:
+        primary_index = 0
+        targets = list(range(page_count))
+    else:
+        if request.page_index < 0 or request.page_index >= page_count:
+            raise PdfSignError("Неверный индекс страницы", "PAGE_OUT_OF_RANGE")
+        primary_index = request.page_index
+        targets = [primary_index]
+
+    page = reader.pages[primary_index]
     page_ref = page.indirect_reference
     if page_ref is None:
         raise PdfSignError("Страница PDF не является косвенным объектом", "PDF_STRUCTURE_ERROR")
@@ -370,6 +383,15 @@ def prepare_signature(
     reserved = {root.idnum, page_ref.idnum}
     if acroform_id is not None:
         reserved.add(acroform_id)
+
+    def _page_ref_for(index: int):
+        reference = reader.pages[index].indirect_reference
+        if reference is not None:
+            reserved.add(reference.idnum)
+        return reference
+
+    target_refs = [_page_ref_for(index) for index in targets]
+    target_dicts = [reader.pages[index].get_object() for index in targets]
 
     def allocate() -> int:
         nonlocal next_id
@@ -440,20 +462,41 @@ def prepare_signature(
     widget = _build_widget(field_name, rect, page_ref, signature_ref, appearance_ref)
     offsets[widget_id] = _write_object(buffer, widget_id, _object_bytes(widget))
 
-    updated_page = _copy_dict(page_dict)
-    annots = updated_page.get("/Annots")
-    if annots is None:
-        annots_array = ArrayObject()
-    else:
-        try:
-            annots_array = ArrayObject(list(annots.get_object()))
-        except Exception:
+    # Stamps for the remaining pages ("all pages" mode) reference the same
+    # signature, so one /Contents serves every page of the revision.
+    page_widgets: dict[int, object] = {primary_index: widget_ref}
+    for offset, index in enumerate(targets):
+        if index == primary_index:
+            continue
+        reference = target_refs[offset]
+        if reference is None:
+            raise PdfSignError("Страница PDF не является косвенным объектом",
+                               "PDF_STRUCTURE_ERROR")
+        extra_id = allocate()
+        offsets[extra_id] = _write_object(
+            buffer,
+            extra_id,
+            _object_bytes(_build_widget(field_name, rect, reference,
+                                        signature_ref, appearance_ref)),
+        )
+        page_widgets[index] = IndirectObject(extra_id, 0, reader)
+
+    for offset, index in enumerate(targets):
+        reference = target_refs[offset]
+        updated_page = _copy_dict(target_dicts[offset])
+        annots = updated_page.get("/Annots")
+        if annots is None:
             annots_array = ArrayObject()
-    annots_array.append(widget_ref)
-    updated_page[NameObject("/Annots")] = annots_array
-    offsets[page_ref.idnum] = _write_object(
-        buffer, page_ref.idnum, _object_bytes(updated_page)
-    )
+        else:
+            try:
+                annots_array = ArrayObject(list(annots.get_object()))
+            except Exception:
+                annots_array = ArrayObject()
+        annots_array.append(page_widgets[index])
+        updated_page[NameObject("/Annots")] = annots_array
+        offsets[reference.idnum] = _write_object(
+            buffer, reference.idnum, _object_bytes(updated_page)
+        )
 
     # --- AcroForm ------------------------------------------------------------
     new_acroform = _copy_dict(acroform)
