@@ -101,7 +101,7 @@ def _status_table() -> QTreeWidget:
     table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
     header = table.header()
     header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-    header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+    header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
     header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
     header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
     table.setMinimumHeight(170)
@@ -109,15 +109,22 @@ def _status_table() -> QTreeWidget:
     return table
 
 
-def _fill_status_table(table: QTreeWidget, snapshot: dict, highlight_id: str = "") -> None:
+def _fill_status_table(
+    table: QTreeWidget, snapshot: dict, highlight_id: str = "", show_handle: bool = False
+) -> None:
     table.clear()
     for item in snapshot.get("participants", []):
+        name = f'{item["order"]}. {item["name"]}'
+        if show_handle and item["status"] not in (network.STATUS_SIGNED, network.STATUS_DECLINED):
+            name = f"⋮⋮   {name}"
         row = QTreeWidgetItem([
-            f'{item["order"]}. {item["name"]}',
+            name,
             item["organization"] or "—",
             item["status_label"] + (f' — {item["detail"]}' if item["detail"] else ""),
             item["signed_at"] or item["joined_at"] or "",
         ])
+        row.setData(0, Qt.ItemDataRole.UserRole, item["id"])
+        row.setToolTip(0, f'{item["name"]}' + (f' · {item["organization"]}' if item["organization"] else ""))
         color = STATUS_COLORS.get(item["status"], theme.ON_SURFACE_VARIANT)
         for column in range(4):
             row.setForeground(column, QColor(color))
@@ -240,6 +247,15 @@ class HostSetupDialog(QDialog):
         par_hint.setWordWrap(True)
         card_layout.addWidget(par_hint)
 
+        par_sub = QWidget()
+        par_sub_layout = QVBoxLayout(par_sub)
+        par_sub_layout.setContentsMargins(38, 0, 0, 0)
+        par_sub_layout.setSpacing(8)
+        self._protocol = QCheckBox("Протокол подписания (Protokol.pdf в архиве)")
+        self._protocol.setChecked(True)
+        par_sub_layout.addWidget(self._protocol)
+        card_layout.addWidget(par_sub)
+
         self._sequential = QRadioButton("Последовательная подпись")
         card_layout.addWidget(self._sequential)
         seq_hint = QLabel(
@@ -300,6 +316,7 @@ class HostSetupDialog(QDialog):
         self._strict.setEnabled(sequential)
         self._visible.setEnabled(sequential)
         self._page_combo.setEnabled(sequential and self._visible.isChecked())
+        self._protocol.setEnabled(not sequential)
 
     def _start(self) -> None:
         self.config = network.SessionConfig(
@@ -308,6 +325,7 @@ class HostSetupDialog(QDialog):
             strict_order=self._strict.isChecked() and self._sequential.isChecked(),
             visible=self._visible.isChecked() and self._sequential.isChecked(),
             page_index=self._page_combo.currentData(),
+            protocol=self._protocol.isChecked() and not self._sequential.isChecked(),
         )
         self.accept()
 
@@ -377,7 +395,32 @@ class HostSessionDialog(QDialog):
         self._summary.setWordWrap(True)
         status_layout.addWidget(self._summary)
         self._table = _status_table()
+        self._table.setSelectionMode(QTreeWidget.SelectionMode.SingleSelection)
+        self._table.setDragDropMode(QTreeWidget.DragDropMode.InternalMove)
+        self._table.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self._table.setDragEnabled(True)
+        self._table.setAcceptDrops(True)
+        self._table.setDropIndicatorShown(True)
+        self._table.model().rowsMoved.connect(self._on_rows_moved)
         status_layout.addWidget(self._table)
+
+        order_row = QHBoxLayout()
+        self._order_hint = QLabel(
+            "Порядок подписания: перетащите строку за «⋮⋮» или используйте кнопки"
+        )
+        self._order_hint.setObjectName("Caption")
+        self._order_hint.setWordWrap(True)
+        order_row.addWidget(self._order_hint, 1)
+        self._up_button = QPushButton("Выше")
+        self._up_button.setObjectName("Text")
+        self._up_button.clicked.connect(lambda: self._move_selected(-1))
+        self._down_button = QPushButton("Ниже")
+        self._down_button.setObjectName("Text")
+        self._down_button.clicked.connect(lambda: self._move_selected(1))
+        order_row.addWidget(self._up_button)
+        order_row.addWidget(self._down_button)
+        status_layout.addLayout(order_row)
+
         self._hint = QLabel(
             "Страница статусов также открывается в браузере по адресу сессии — "
             "удобно показывать на общем экране."
@@ -386,6 +429,21 @@ class HostSessionDialog(QDialog):
         self._hint.setWordWrap(True)
         status_layout.addWidget(self._hint)
         layout.addWidget(status_card, 1)
+
+        self._order_enabled = session.config.mode == network.MODE_SEQUENTIAL
+        for widget in (self._table, self._up_button, self._down_button, self._order_hint):
+            widget.setEnabled(self._order_enabled)
+        if not self._order_enabled:
+            self._order_hint.setText(
+                "При соподписи участники подписывают независимо — порядок не важен"
+            )
+            self._table.setDragDropMode(QTreeWidget.DragDropMode.NoDragDrop)
+        elif session.config.strict_order:
+            self._order_hint.setText(
+                "Строгая очередь: перетащите строку за «⋮⋮» или используйте кнопки — "
+                "подписывать сможет только первый в списке"
+            )
+        self._table.setToolTip("Порядок подписания можно менять перетаскиванием")
 
         self._log = QTextEdit()
         self._log.setReadOnly(True)
@@ -420,7 +478,7 @@ class HostSessionDialog(QDialog):
     # ------------------------------------------------------------------ logic
     def _tick(self) -> None:
         snap = self._session.snapshot()
-        _fill_status_table(self._table, snap)
+        _fill_status_table(self._table, snap, show_handle=self._order_enabled)
         self._update_links(self._server.addresses())
         signed = sum(1 for p in snap["participants"] if p["status"] == network.STATUS_SIGNED)
         declined = sum(1 for p in snap["participants"] if p["status"] == network.STATUS_DECLINED)
@@ -431,8 +489,54 @@ class HostSessionDialog(QDialog):
             f"версия документа: {snap['doc_version']}"
         )
 
+    # ------------------------------------------------------------ ordering
+    def _table_pids(self) -> list[str]:
+        pids: list[str] = []
+        for index in range(self._table.topLevelItemCount()):
+            item = self._table.topLevelItem(index)
+            pid = item.data(0, Qt.ItemDataRole.UserRole)
+            if pid:
+                pids.append(str(pid))
+        return pids
+
+    def _on_rows_moved(self, *_args) -> None:
+        if not self._order_enabled:
+            return
+        pids = self._table_pids()
+        try:
+            self._session.reorder_participants(pids)
+        except network.NetworkError as exc:
+            self._log.append(f"✗ Порядок не изменён: {exc}")
+        else:
+            self._log.append("Порядок подписания обновлён")
+        self._tick()
+
+    def _move_selected(self, delta: int) -> None:
+        if not self._order_enabled:
+            return
+        item = self._table.currentItem()
+        if item is None:
+            self._log.append("Выберите участника в таблице, чтобы изменить порядок")
+            return
+        pid = str(item.data(0, Qt.ItemDataRole.UserRole) or "")
+        try:
+            moved = self._session.move_participant(pid, delta)
+        except network.NetworkError as exc:
+            self._log.append(f"✗ Порядок не изменён: {exc}")
+            return
+        if moved:
+            self._log.append("Порядок подписания обновлён")
+            self._tick()
+            self._select_pid(pid)
+
+    def _select_pid(self, pid: str) -> None:
+        for index in range(self._table.topLevelItemCount()):
+            item = self._table.topLevelItem(index)
+            if str(item.data(0, Qt.ItemDataRole.UserRole) or "") == pid:
+                self._table.setCurrentItem(item)
+                return
+
     def _update_links(self, links: list[str]) -> None:
-        """All addresses in one selectable field (copied in a single click)."""
         text = " · ".join(links)
         if self._links_edit.text() != text:
             self._links_edit.setText(text)
@@ -472,23 +576,25 @@ class HostSessionDialog(QDialog):
         document, sig_files, note = self._session.results()
         stem = pathlib.Path(snap["doc_name"]).stem or "document"
         if sig_files:
-            directory = QFileDialog.getExistingDirectory(
-                self, "Выберите папку для документа и подписей"
+            default = str(pathlib.Path(snap["doc_name"]).with_name(self._session.archive_name()))
+            path, _ = QFileDialog.getSaveFileName(
+                self, "Сохранить архив с подписями", default, "ZIP (*.zip)"
             )
-            if not directory:
+            if not path:
                 return
-            target = pathlib.Path(directory)
+            if not path.lower().endswith(".zip"):
+                path += ".zip"
             try:
-                (target / snap["doc_name"]).write_bytes(document)
-                for name, content in sig_files:
-                    (target / name).write_bytes(content)
+                pathlib.Path(path).write_bytes(self._session.package_zip())
             except OSError as exc:
-                QMessageBox.critical(self, "Сохранение", f"Не удалось сохранить файлы: {exc}")
+                QMessageBox.critical(self, "Сохранение", f"Не удалось сохранить архив: {exc}")
                 return
             QMessageBox.information(
                 self, "Готово",
-                f"Сохранено: {snap['doc_name']} и {len(sig_files)} файл(а) подписей .sig.\n"
-                "Файлы .sig проверяются штатно через CryptoPro (cryptcp -vsig).",
+                f"Архив сохранён:\n{path}\n\n"
+                f"Внутри: {snap['doc_name']}, {len(sig_files)} файл(а) подписей .sig"
+                + (", Protokol.pdf" if self._session.config.protocol else "")
+                + ".\nФайлы .sig проверяются штатно через CryptoPro (cryptcp -vsign).",
             )
         else:
             default = str(pathlib.Path(snap["doc_name"]).with_name(stem + "-network-signed.pdf"))
@@ -701,6 +807,14 @@ class JoinSessionDialog(QDialog):
         self._decline.setEnabled(False)
         self._decline.clicked.connect(self._decline_signing)
         actions.addWidget(self._decline)
+        self._download = QPushButton("Скачать архив")
+        self._download.setObjectName("Text")
+        self._download.setEnabled(False)
+        self._download.setToolTip(
+            "Готовый пакет: исходный документ, файлы подписей .sig и протокол"
+        )
+        self._download.clicked.connect(self._download_package)
+        actions.addWidget(self._download)
         actions.addStretch(1)
         self._close = QPushButton("Закрыть")
         self._close.setObjectName("Text")
@@ -879,6 +993,46 @@ class JoinSessionDialog(QDialog):
         self._decline.setEnabled(False)
         self._sign.setText("Отказ от подписи отправлен")
 
+    # ------------------------------------------------------------ package
+    def _download_package(self) -> None:
+        if self._client is None:
+            return
+        try:
+            name, archive = self._client.package()
+        except network.NetworkError as exc:
+            QMessageBox.critical(self, "Архив", str(exc))
+            return
+        default = str(pathlib.Path.home() / name)
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Сохранить архив с подписями", default, "ZIP (*.zip)"
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".zip"):
+            path += ".zip"
+        try:
+            pathlib.Path(path).write_bytes(archive)
+        except OSError as exc:
+            QMessageBox.critical(self, "Сохранение", f"Не удалось сохранить архив: {exc}")
+            return
+        QMessageBox.information(
+            self, "Готово",
+            f"Архив сохранён:\n{path}\n\n"
+            "Внутри — исходный документ, файлы подписей .sig всех участников"
+            " и протокол подписания.",
+        )
+
+    def _update_download_state(self, state: dict) -> None:
+        signed = [
+            p for p in state.get("participants", []) if p["status"] == network.STATUS_SIGNED
+        ]
+        available = self._mode == network.MODE_PARALLEL and bool(signed)
+        self._download.setEnabled(available)
+        if available:
+            self._download.setToolTip(
+                f"В архиве {len(signed)} файл(а) подписей .sig, исходный документ и протокол"
+            )
+
     # ----------------------------------------------------------------- polling
     def _poll(self) -> None:
         if self._client is None:
@@ -888,6 +1042,7 @@ class JoinSessionDialog(QDialog):
         except network.NetworkError:
             return
         _fill_status_table(self._table, state, highlight_id=self._client.participant_id)
+        self._update_download_state(state)
         if self._joined and self._worker is None:
             for item in state.get("participants", []):
                 if item["id"] == self._client.participant_id:
@@ -956,4 +1111,5 @@ def _run_host(window) -> None:
         final_doc = session.document_bytes()
         if final_doc != window._pdf_data:
             window._adopt_result(final_doc, source="сетевая сессия")
+
 

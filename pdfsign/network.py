@@ -23,13 +23,16 @@ from __future__ import annotations
 import base64
 import datetime as dt
 import html
+import io
 import json
+import re
 import secrets
 import socket
 import threading
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -74,6 +77,7 @@ class SessionConfig:
     reason: str = "Подписание документа"
     location: str = ""
     doc_name: str = "document.pdf"
+    protocol: bool = True  # parallel mode: add Protokol.pdf to the package
 
 
 @dataclass
@@ -135,6 +139,16 @@ class RemoteCertificate:
 
 def _now() -> str:
     return dt.datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+
+
+_INVALID_FILE_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def _safe_file_part(name: str) -> str:
+    """Make a participant name usable in a file name (keeps Cyrillic)."""
+    cleaned = _INVALID_FILE_CHARS.sub("", name or "").strip().replace(" ", "_")
+    cleaned = cleaned.strip("._")
+    return cleaned[:60]
 
 
 def _new_code(length: int = 6) -> str:
@@ -204,7 +218,12 @@ def verify_cms_digest(cms: bytes, data: bytes) -> tuple[bool, str]:
     """Check that the CMS messageDigest matches the given bytes."""
     expected = crypto.cms_message_digest(cms)
     if expected is None:
-        return True, "CMS без атрибута messageDigest — дайджест не проверялся"
+        # No signed attribute to compare: fall back to the provider itself, so a
+        # CMS without messageDigest cannot pass as valid unchecked.
+        ok, note = crypto.verify_detached(cms, data)
+        if ok:
+            return True, f"подпись проверена CryptoPro ({note})"
+        return False, "в подписи нет атрибута messageDigest — проверить не удалось"
     actual = crypto.streebog256(data)
     if actual is None:
         return True, "локальный ГОСТ-хеш недоступен — дайджест не проверялся"
@@ -343,7 +362,10 @@ class SignSession:
         """Return an error message when strict order blocks this participant."""
         if not self.config.strict_order or self.config.mode != MODE_SEQUENTIAL:
             return ""
-        pending = [p for p in self._participants if p.status == STATUS_PENDING]
+        pending = sorted(
+            [p for p in self._participants if p.status == STATUS_PENDING],
+            key=lambda p: p.order,
+        )
         if not pending:
             return "Все участники уже подписали"
         if pending[0] is not participant:
@@ -352,6 +374,66 @@ class SignSession:
                 "Строгая очередь: дождитесь своей очереди."
             )
         return ""
+
+    # ------------------------------------------------------- participant order
+    def reorder_participants(self, ordered_pids: list[str]) -> None:
+        """Change the signing order (sequential scheme only).
+
+        Participants who already signed (or declined) keep their places at the
+        front; only the queue of those still waiting is reordered.
+        """
+        with self._lock:
+            if self.config.mode != MODE_SEQUENTIAL:
+                raise NetworkError(
+                    "Порядок участников меняется только в последовательной схеме: "
+                    "при соподписи все подписывают независимо."
+                )
+            known = {p.pid for p in self._participants}
+            if set(ordered_pids) != known:
+                raise NetworkError("Список участников изменился — обновите таблицу")
+            by_pid = {p.pid: p for p in self._participants}
+            finished = sorted(
+                [
+                    p
+                    for p in self._participants
+                    if p.status in (STATUS_SIGNED, STATUS_DECLINED)
+                ],
+                key=lambda p: p.order,
+            )
+            waiting = [
+                by_pid[pid]
+                for pid in ordered_pids
+                if by_pid[pid].status not in (STATUS_SIGNED, STATUS_DECLINED)
+            ]
+            order = 1
+            for participant in finished + waiting:
+                participant.order = order
+                order += 1
+
+    def move_participant(self, pid: str, delta: int) -> bool:
+        """Move one waiting participant up (-1) or down (+1). Returns success."""
+        with self._lock:
+            if self.config.mode != MODE_SEQUENTIAL:
+                raise NetworkError(
+                    "Порядок участников меняется только в последовательной схеме"
+                )
+            ordered = sorted(self._participants, key=lambda p: p.order)
+            pids = [p.pid for p in ordered]
+            if pid not in pids:
+                return False
+            index = pids.index(pid)
+            target = index + delta
+            if target < 0 or target >= len(pids):
+                return False
+            participant = ordered[index]
+            neighbour = ordered[target]
+            if participant.status in (STATUS_SIGNED, STATUS_DECLINED):
+                return False
+            if neighbour.status in (STATUS_SIGNED, STATUS_DECLINED):
+                return False
+            pids[index], pids[target] = pids[target], pids[index]
+        self.reorder_participants(pids)
+        return True
 
     # ------------------------------------------------- sequential: two-phase
     def prepare_signature(self, token: str) -> tuple[bytes, int]:
@@ -514,9 +596,8 @@ class SignSession:
                 p for p in self._participants if p.status == STATUS_SIGNED and p.sig_b64
             ]
             if self.config.mode == MODE_PARALLEL:
-                stem = self.config.doc_name.rsplit(".", 1)[0] or "document"
                 files = [
-                    (f"{stem}-{p.order}.sig", base64.b64decode(p.sig_b64))
+                    (self._sig_file_name(p), base64.b64decode(p.sig_b64))
                     for p in sorted(signed, key=lambda p: p.order)
                 ]
                 return self._original, files, f"Соподпись: подписей собрано {len(files)}"
@@ -524,6 +605,58 @@ class SignSession:
                 [p for p in self._participants if p.status == STATUS_SIGNED]
             )
             return self._doc, [], f"Подписей в документе: {signed_count}"
+
+    # ------------------------------------------------- parallel: .sig package
+    def _sig_file_name(self, participant: Participant) -> str:
+        """``Dogovor.pdf`` + «Иванов» → ``Dogovor_Иванов.pdf.sig``."""
+        doc = self.config.doc_name or "document.pdf"
+        stem, dot, suffix = doc.rpartition(".")
+        if not dot:
+            stem, suffix = doc, "pdf"
+        safe = _safe_file_part(participant.name) or f"uchastnik{participant.order}"
+        return f"{stem}_{safe}.{suffix}.sig"
+
+    def signature_files(self) -> list[tuple[str, bytes]]:
+        """Detached signatures with their file names (parallel mode)."""
+        _doc, files, _note = self.results()
+        return files
+
+    def archive_name(self) -> str:
+        doc = self.config.doc_name or "document.pdf"
+        stem = doc.rsplit(".", 1)[0] or "document"
+        return f"{stem}_podpisi.zip"
+
+    def package_zip(self) -> bytes:
+        """Final package: original document + every .sig + optional protocol."""
+        from . import protocol
+
+        document, files, _note = self.results()
+        snapshot = self.snapshot()
+        ordered = sorted(
+            [p for p in self._participants if p.status == STATUS_SIGNED and p.sig_b64],
+            key=lambda p: p.order,
+        )
+        sig_names = {p.pid: self._sig_file_name(p) for p in ordered}
+
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr(snapshot["doc_name"] or "document.pdf", document)
+            for name, content in files:
+                archive.writestr(name, content)
+            if self.config.protocol:
+                archive.writestr(
+                    "Protokol.pdf",
+                    protocol.build_protocol(
+                        doc_name=snapshot["doc_name"] or "document.pdf",
+                        mode_label=snapshot["mode_label"],
+                        session_code=snapshot["code"],
+                        started_at=snapshot["started_at"],
+                        participants=snapshot["participants"],
+                        sig_names=sig_names,
+                        finished_at=_now() if snapshot["finished"] else "",
+                    ),
+                )
+        return buffer.getvalue()
 
 
 # ---------------------------------------------------------------------------
@@ -685,6 +818,24 @@ def _make_handler(session: SignSession) -> type[BaseHTTPRequestHandler]:
                     self.end_headers()
                     self.wfile.write(data)
                     return
+                if path == "/api/package":
+                    self._check_code(params)
+                    if session.config.mode != MODE_PARALLEL:
+                        raise NetworkError(
+                            "Архив формируется только в режиме соподписи: "
+                            "в последовательной схеме подписи уже внутри PDF."
+                        )
+                    archive = session.package_zip()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/zip")
+                    self.send_header(
+                        "Content-Disposition",
+                        f'attachment; filename="{session.archive_name()}"',
+                    )
+                    self.send_header("Content-Length", str(len(archive)))
+                    self.end_headers()
+                    self.wfile.write(archive)
+                    return
                 self._error("Не найдено", 404)
             except NetworkError as exc:
                 self._error(str(exc), 403)
@@ -829,7 +980,8 @@ class SessionClient:
     def _url(self, path: str) -> str:
         return f"{self.base_url}{path}"
 
-    def _request(self, path: str, payload: dict | None = None, headers: dict | None = None):
+    def _request(self, path: str, payload: dict | None = None, headers: dict | None = None,
+                 timeout: float = HTTP_TIMEOUT):
         data = None
         request_headers = dict(headers or {})
         if payload is not None:
@@ -837,7 +989,7 @@ class SessionClient:
             request_headers["Content-Type"] = "application/json; charset=utf-8"
         request = urllib.request.Request(self._url(path), data=data, headers=request_headers)
         try:
-            with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT) as response:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
                 raw = response.read()
                 status = response.status
                 response_headers = response.headers
@@ -928,6 +1080,16 @@ class SessionClient:
 
     def decline(self, reason: str = "") -> None:
         self._request("/api/decline", {"reason": reason}, headers={"X-Token": self.token})
+
+    def package(self) -> tuple[str, bytes]:
+        """Parallel mode: download the final ZIP (document + .sig files)."""
+        raw, _, headers = self._request(f"/api/package?code={self.code}", timeout=120.0)
+        disposition = headers.get("Content-Disposition") or ""
+        match = re.search(r'filename="?([^";]+)', disposition)
+        name = match.group(1) if match else "podpisi.zip"
+        if not raw.startswith(b"PK"):
+            raise NetworkError("Сервер вернул не архив")
+        return name, raw
 
     def submit(self, doc_version: int, cms: bytes) -> None:
         """Parallel mode: hand in a detached CMS for the .sig collection."""

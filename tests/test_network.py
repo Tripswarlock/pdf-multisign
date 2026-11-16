@@ -225,12 +225,41 @@ def test_parallel(source: bytes, failures: list[str]) -> None:
         if len(sig_files) != 2:
             failures.append(f"ожидалось 2 файла .sig, получено {len(sig_files)}")
         for name, cms in sig_files:
-            if not name.endswith(".sig"):
-                failures.append(f"имя файла подписи должно оканчиваться на .sig: {name}")
+            if not name.endswith(".pdf.sig"):
+                failures.append(f"имя файла подписи должно оканчиваться на .pdf.sig: {name}")
+            if "_" not in name:
+                failures.append(f"в имени подписи должен быть участник: {name}")
             digest = crypto.cms_message_digest(cms)
             actual = crypto.streebog256(source)
             if bytes(digest) != bytes(actual):
                 failures.append(f"{name}: хеш .sig не соответствует исходному документу")
+
+        # финальный архив: документ + .sig каждого + протокол
+        import io
+        import zipfile
+
+        archive = session.package_zip()
+        if not archive.startswith(b"PK"):
+            failures.append("пакет должен быть zip-архивом")
+        names = zipfile.ZipFile(io.BytesIO(archive)).namelist()
+        expected_doc = "test.pdf"
+        if expected_doc not in names:
+            failures.append(f"в архиве нет исходного документа: {names}")
+        sig_entries = [n for n in names if n.endswith(".pdf.sig")]
+        if len(sig_entries) != 2:
+            failures.append(f"в архиве должно быть 2 .sig, найдено {sig_entries}")
+        if "Protokol.pdf" not in names:
+            failures.append(f"в архиве нет протокола: {names}")
+        else:
+            protocol_bytes = zipfile.ZipFile(io.BytesIO(archive)).read("Protokol.pdf")
+            if not protocol_bytes.startswith(b"%PDF"):
+                failures.append("Protokol.pdf не является PDF")
+        # архив отдаётся участнику по HTTP
+        name, downloaded = two.package()
+        if not downloaded.startswith(b"PK"):
+            failures.append("клиент не получил архив")
+        if not name.endswith(".zip"):
+            failures.append(f"неверное имя архива: {name}")
     finally:
         server.shutdown()
 
@@ -292,6 +321,67 @@ def test_helpers(failures: list[str]) -> None:
         failures.append(f"клиент не подставил порт: {client.base_url}")
 
 
+def test_order(source: bytes, failures: list[str]) -> None:
+    """Sequential mode: the host may change the signing order."""
+    config = network.SessionConfig(
+        mode=network.MODE_SEQUENTIAL, strict_order=True, visible=False, doc_name="test.pdf"
+    )
+    session = network.SignSession(source, config)
+    parts = [
+        session.join({"name": name, "thumbprint": thumb})[0]
+        for name, thumb in (("Первый", "AA"), ("Второй", "BB"), ("Третий", "CC"))
+    ]
+    pids = [p.pid for p in parts]
+
+    session.reorder_participants([pids[2], pids[0], pids[1]])
+    order = [(p.order, p.name) for p in sorted(session._participants, key=lambda p: p.order)]
+    if order != [(1, "Третий"), (2, "Первый"), (3, "Второй")]:
+        failures.append(f"порядок после перестановки неверен: {order}")
+
+    try:
+        session.prepare_signature(parts[0].token)
+        failures.append("строгая очередь не учла новый порядок")
+    except network.NetworkError:
+        pass
+    signed_bytes, _version = session.prepare_signature(parts[2].token)
+    if not signed_bytes:
+        failures.append("первый по новому порядку не смог подписать")
+    session.cancel_pending(parts[2].token)
+
+    if not session.move_participant(parts[1].pid, -1):
+        failures.append("move_participant вверх не сработал")
+    if session.move_participant(parts[1].pid, -5):
+        failures.append("move_participant должен отклонять выход за границы")
+
+    parallel = network.SignSession(
+        source, network.SessionConfig(mode=network.MODE_PARALLEL, doc_name="test.pdf")
+    )
+    parallel_pids = [
+        parallel.join({"name": name, "thumbprint": thumb})[0].pid
+        for name, thumb in (("A", "AA"), ("B", "BB"))
+    ]
+    try:
+        parallel.reorder_participants(parallel_pids)
+        failures.append("в соподписи перестановка должна быть запрещена")
+    except network.NetworkError:
+        pass
+
+    # a participant who already signed stays pinned at the front
+    pinned = network.SignSession(
+        source, network.SessionConfig(mode=network.MODE_SEQUENTIAL, doc_name="test.pdf")
+    )
+    pinned_parts = [
+        pinned.join({"name": name, "thumbprint": thumb})[0]
+        for name, thumb in (("X", "AA"), ("Y", "BB"), ("Z", "CC"))
+    ]
+    reserved, _version = pinned.prepare_signature(pinned_parts[0].token)
+    pinned.commit_signature(pinned_parts[0].token, make_test_cms(reserved))
+    pinned.reorder_participants([pinned_parts[2].pid, pinned_parts[1].pid, pinned_parts[0].pid])
+    order = [(p.order, p.name, p.status) for p in sorted(pinned._participants, key=lambda p: p.order)]
+    if order[0][2] != network.STATUS_SIGNED:
+        failures.append(f"подписавший участник должен остаться первым: {order}")
+
+
 def main() -> int:
     source = find_fixture().read_bytes()
     failures: list[str] = []
@@ -299,6 +389,7 @@ def main() -> int:
     test_sequential(source, failures)
     test_parallel(source, failures)
     test_strict_order(source, failures)
+    test_order(source, failures)
     if failures:
         print("FAILED")
         for failure in failures:
