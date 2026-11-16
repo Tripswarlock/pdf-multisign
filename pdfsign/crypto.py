@@ -485,6 +485,15 @@ def verify_detached(cms: bytes, content: bytes) -> tuple[bool, str]:
         return False, f"Не удалось проверить подпись: {message}"
 
 
+def store_hint() -> str:
+    """Actionable advice when no certificate is available (Windows default)."""
+    return (
+        "Хранилище CurrentUser\\My не содержит сертификатов. "
+        "Установите сертификат с закрытым ключом (certutil -user -store My) "
+        "и убедитесь, что ключ находится в контейнере CryptoPro CSP."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Platform dispatch
 # ---------------------------------------------------------------------------
@@ -501,6 +510,7 @@ if _sys.platform != "win32":
         list_certificates = _linux.list_certificates  # type: ignore[assignment]
         sign_detached = _linux.sign_detached  # type: ignore[assignment]
         verify_detached = _linux.verify_detached  # type: ignore[assignment]
+        store_hint = _linux.store_hint  # type: ignore[assignment]
         COM_AVAILABLE = _linux.available()
     except Exception as _exc:  # pragma: no cover - fallback path
         _LINUX_IMPORT_ERROR = str(_exc)

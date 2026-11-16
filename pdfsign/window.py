@@ -477,8 +477,9 @@ class MainWindow(QMainWindow):
             return
 
         if not self._certificates:
-            label = QLabel(service.store_label() + " не содержит сертификатов")
+            label = QLabel(service.store_label() + " не содержит сертификатов\n" + crypto.store_hint())
             label.setObjectName("Caption")
+            label.setWordWrap(True)
             self._cert_box.insertWidget(0, label)
             return
 

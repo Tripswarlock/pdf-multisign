@@ -74,22 +74,8 @@ def _run(args: list[str], stdin_data: bytes | None = None, timeout: int = 120):
         return 127, f"Не удалось запустить {args[0]}: {exc}"
 
 
-def list_certificates() -> list[CertificateInfo]:
-    tool = certmgr_path()
-    if not tool:
-        raise CryptoError(
-            "certmgr из CryptoPro CSP не найден — список сертификатов недоступен",
-            "CRYPTOPRO_UNAVAILABLE",
-        )
-    code, output = _run([tool, "-list", "-store", "uMy"], timeout=60)
-    if "Список сертификатов пуст" in output or "Требуемый сертификат не существует" in output:
-        return []
-    if code not in (0, 1):
-        raise CryptoError(
-            "certmgr завершился с ошибкой: " + output.strip().splitlines()[0][:160],
-            "CERTMGR_ERROR",
-        )
-
+def _parse_certmgr(output: str) -> list[CertificateInfo]:
+    """Parse ``certmgr -list`` output into certificate descriptors."""
     certificates: list[CertificateInfo] = []
     for block in re.split(r"\n-{2,}\s*\n|\n\d+-{3,}", output):
         if "Subject" not in block:
@@ -127,15 +113,102 @@ def list_certificates() -> list[CertificateInfo]:
         info.not_before = not_before
         info.not_after = not_after
         certificates.append(info)
+    return certificates
 
-    certificates.sort(
+
+def list_containers() -> list[str]:
+    """Private-key containers known to CryptoPro (token or file based)."""
+    tool = _find_tool("csptest")
+    if not tool:
+        return []
+    code, output = _run([tool, "-keyset", "-enum_containers", "-verifyc", "-silent"], timeout=60)
+    containers: list[str] = []
+    for line in output.splitlines():
+        line = line.strip()
+        if not line.startswith("\\\\.\\"):
+            continue
+        name = line.rstrip()
+        if name and name not in containers:
+            containers.append(name)
+    return containers
+
+
+def readers_present() -> bool | None:
+    """True/False when the check is possible, None when csptest is missing."""
+    tool = _find_tool("csptest")
+    if not tool:
+        return None
+    _code, output = _run([tool, "-card", "-enum"], timeout=30)
+    if "SCARD_E_NO_READERS_AVAILABLE" in output or "0x8010002e" in output:
+        return False
+    return True
+
+
+def store_hint() -> str:
+    """Actionable hint when the certificate list is empty."""
+    notes = [
+        "certmgr -list -store uMy не вернул сертификатов.",
+        "Установите сертификат в хранилище пользователя: "
+        "certmgr -inst -store uMy -file cert.cer (или -pfx).",
+    ]
+    readers = readers_present()
+    if readers is False:
+        notes.append(
+            "Смарт-карт-ридеры не обнаружены: если ключ на токене, пробросьте "
+            "устройство в систему (usbipd/USB для ВМ) и проверьте pcscd."
+        )
+    containers = list_containers()
+    if containers:
+        notes.append(
+            "Найдены контейнеры без установленного сертификата: "
+            + ", ".join(containers[:5])
+            + ". Установите сертификат из контейнера: certmgr -inst -store uMy -cont <контейнер>."
+        )
+    else:
+        notes.append("Контейнеры закрытых ключей не найдены.")
+    return " ".join(notes)
+
+
+def list_certificates() -> list[CertificateInfo]:
+    tool = certmgr_path()
+    if not tool:
+        raise CryptoError(
+            "certmgr из CryptoPro CSP не найден — список сертификатов недоступен",
+            "CRYPTOPRO_UNAVAILABLE",
+        )
+    code, output = _run([tool, "-list", "-store", "uMy"], timeout=60)
+    empty = "Список сертификатов пуст" in output or "Требуемый сертификат не существует" in output
+    if code not in (0, 1) and not empty:
+        raise CryptoError(
+            "certmgr завершился с ошибкой: " + output.strip().splitlines()[0][:160],
+            "CERTMGR_ERROR",
+        )
+
+    certificates = _parse_certmgr(output)
+
+    # The token may hold a certificate that is not imported into uMy yet.
+    # Enumerate private-key containers and try to read certificates from them.
+    if not certificates:
+        for container in list_containers():
+            _code, dump = _run([tool, "-list", "-container", container], timeout=60)
+            certificates.extend(_parse_certmgr(dump))
+
+    seen: set[str] = set()
+    unique: list[CertificateInfo] = []
+    for certificate in certificates:
+        if not certificate.thumbprint or certificate.thumbprint in seen:
+            continue
+        seen.add(certificate.thumbprint)
+        unique.append(certificate)
+
+    unique.sort(
         key=lambda item: (
             not item.sign_capable,
             not item.is_valid_now,
             -(item.not_after.timestamp() if item.not_after else 0),
         )
     )
-    return certificates
+    return unique
 
 
 def _field(block: str, name: str) -> str:

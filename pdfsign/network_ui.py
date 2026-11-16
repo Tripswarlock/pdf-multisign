@@ -60,6 +60,37 @@ def _shadow(widget: QWidget) -> None:
     widget.setGraphicsEffect(effect)
 
 
+def _confirm(parent, title: str, text: str) -> bool:
+    """Yes/No confirmation with a fixed button order on every platform.
+
+    Native ``QMessageBox`` reorders Yes/No depending on the platform style, so
+    the buttons are laid out explicitly (Да слева, Нет справа) — identical on
+    Windows and Linux and always in Russian.
+    """
+    dialog = QDialog(parent)
+    dialog.setWindowTitle(title)
+    dialog.setStyleSheet(theme.stylesheet())
+    layout = QVBoxLayout(dialog)
+    layout.setContentsMargins(22, 20, 22, 16)
+    layout.setSpacing(14)
+    label = QLabel(text)
+    label.setWordWrap(True)
+    layout.addWidget(label)
+    buttons = QHBoxLayout()
+    buttons.addStretch(1)
+    yes = QPushButton("Да")
+    yes.setObjectName("Filled")
+    no = QPushButton("Нет")
+    no.setObjectName("Text")
+    yes.clicked.connect(dialog.accept)
+    no.clicked.connect(dialog.reject)
+    buttons.addWidget(yes)
+    buttons.addWidget(no)
+    layout.addLayout(buttons)
+    yes.setDefault(True)
+    return dialog.exec() == QDialog.DialogCode.Accepted
+
+
 def _status_table() -> QTreeWidget:
     table = QTreeWidget()
     table.setColumnCount(4)
@@ -74,6 +105,7 @@ def _status_table() -> QTreeWidget:
     header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
     header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
     table.setMinimumHeight(170)
+    table.setMinimumWidth(300)
     return table
 
 
@@ -293,7 +325,7 @@ class HostSessionDialog(QDialog):
         self._session = session
         self._server = server
         self.setWindowTitle("Сетевая сессия — организатор")
-        self.resize(760, 640)
+        self.resize(507, 640)
         self.setStyleSheet(theme.stylesheet())
         self._saved = False
 
@@ -306,6 +338,7 @@ class HostSessionDialog(QDialog):
         snap = session.snapshot()
         doc_line = QLabel(f"Документ: {snap['doc_name']} · {snap['mode_label']}")
         doc_line.setObjectName("Caption")
+        doc_line.setWordWrap(True)
         info_layout.addWidget(doc_line)
 
         code_row = QHBoxLayout()
@@ -323,8 +356,13 @@ class HostSessionDialog(QDialog):
         self._links = QLabel()
         self._links.setObjectName("Caption")
         self._links.setWordWrap(True)
-        self._links.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self._links.setVisible(False)
         info_layout.addWidget(self._links)
+        self._links_edit = QLineEdit()
+        self._links_edit.setReadOnly(True)
+        self._links_edit.setMinimumWidth(150)
+        self._links_edit.setToolTip("Адреса для подключения участников")
+        info_layout.addWidget(self._links_edit)
 
         copy = QPushButton("Скопировать приглашение")
         copy.setObjectName("Tonal")
@@ -336,6 +374,7 @@ class HostSessionDialog(QDialog):
         _shadow(status_card)
         self._summary = QLabel()
         self._summary.setObjectName("Caption")
+        self._summary.setWordWrap(True)
         status_layout.addWidget(self._summary)
         self._table = _status_table()
         status_layout.addWidget(self._table)
@@ -360,13 +399,13 @@ class HostSessionDialog(QDialog):
         layout.addWidget(self._log)
 
         buttons = QHBoxLayout()
-        self._abort = QPushButton("Прервать сессию")
+        self._abort = QPushButton("Прервать")
         self._abort.setObjectName("Text")
         self._abort.setStyleSheet(f"QPushButton {{ color: {theme.ERROR}; }}")
         self._abort.clicked.connect(self._abort_session)
         buttons.addWidget(self._abort)
         buttons.addStretch(1)
-        self._finish = QPushButton("Завершить и сохранить итог")
+        self._finish = QPushButton("Завершить и сохранить")
         self._finish.setObjectName("Filled")
         self._finish.clicked.connect(self._finish_session)
         buttons.addWidget(self._finish)
@@ -382,8 +421,7 @@ class HostSessionDialog(QDialog):
     def _tick(self) -> None:
         snap = self._session.snapshot()
         _fill_status_table(self._table, snap)
-        links = self._server.addresses()
-        self._links.setText("Адреса для подключения: " + " · ".join(links))
+        self._update_links(self._server.addresses())
         signed = sum(1 for p in snap["participants"] if p["status"] == network.STATUS_SIGNED)
         declined = sum(1 for p in snap["participants"] if p["status"] == network.STATUS_DECLINED)
         signing = sum(1 for p in snap["participants"] if p["status"] == network.STATUS_SIGNING)
@@ -392,6 +430,13 @@ class HostSessionDialog(QDialog):
             f"отказалось: {declined} · подписывает: {signing} · "
             f"версия документа: {snap['doc_version']}"
         )
+
+    def _update_links(self, links: list[str]) -> None:
+        """All addresses in one selectable field (copied in a single click)."""
+        text = " · ".join(links)
+        if self._links_edit.text() != text:
+            self._links_edit.setText(text)
+            self._links_edit.setCursorPosition(0)
 
     def _copy_invite(self) -> None:
         snap = self._session.snapshot()
@@ -408,12 +453,12 @@ class HostSessionDialog(QDialog):
         self._log.append("Приглашение скопировано в буфер обмена")
 
     def _abort_session(self) -> None:
-        answer = QMessageBox.question(
-            self, "Прервать сессию",
+        if not _confirm(
+            self,
+            "Прервать сессию",
             "Участники потеряют доступ к сессии. Итоговый файл не будет сохранён.\n"
             "Прервать?",
-        )
-        if answer != QMessageBox.StandardButton.Yes:
+        ):
             return
         self._session.finalize("Сессия прервана организатором")
         self.reject()
@@ -600,7 +645,7 @@ class JoinSessionDialog(QDialog):
         addr_caption = QLabel("Адрес")
         addr_caption.setObjectName("Caption")
         self._address = QLineEdit()
-        self._address.setPlaceholderText("например 192.168.1.50 или 192.168.1.50:8443")
+        self._address.setPlaceholderText("192.168.1.50 — порт 8443 подставится сам")
         port_caption = QLabel("Код")
         port_caption.setObjectName("Caption")
         self._code = QLineEdit()
@@ -755,8 +800,9 @@ class JoinSessionDialog(QDialog):
             self._rows.append(label)
             return
         if not certificates:
-            label = QLabel(service.store_label() + " не содержит сертификатов")
+            label = QLabel(service.store_label() + " не содержит сертификатов\n" + crypto.store_hint())
             label.setObjectName("Caption")
+            label.setWordWrap(True)
             self._cert_box.insertWidget(0, label)
             self._rows.append(label)
             return
@@ -818,10 +864,11 @@ class JoinSessionDialog(QDialog):
     def _decline_signing(self) -> None:
         if self._client is None or not self._joined:
             return
-        answer = QMessageBox.question(
-            self, "Отказ от подписи", "Отказаться от подписания документа?\nОрганизатор увидит ваш отказ."
-        )
-        if answer != QMessageBox.StandardButton.Yes:
+        if not _confirm(
+            self,
+            "Отказ от подписи",
+            "Отказаться от подписания документа?\nОрганизатор увидит ваш отказ.",
+        ):
             return
         try:
             self._client.decline("")
@@ -909,3 +956,4 @@ def _run_host(window) -> None:
         final_doc = session.document_bytes()
         if final_doc != window._pdf_data:
             window._adopt_result(final_doc, source="сетевая сессия")
+

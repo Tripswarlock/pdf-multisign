@@ -138,7 +138,12 @@ def _now() -> str:
 
 
 def _new_code(length: int = 6) -> str:
-    return "".join(secrets.choice(JOIN_CODE_ALPHABET) for _ in range(length))
+    """Numeric session code: easier to dictate over the phone, no look-alike letters."""
+    if length <= 0:
+        return ""
+    upper = 10 ** length - 1
+    lower = 10 ** (length - 1)
+    return str(secrets.randbelow(upper - lower + 1) + lower)
 
 
 def lan_addresses() -> list[str]:
@@ -167,6 +172,32 @@ def lan_addresses() -> list[str]:
 
 def computer_name() -> str:
     return socket.gethostname()
+
+
+def normalize_base_url(base_url: str, default_port: int = DEFAULT_PORT) -> str:
+    """Add the scheme and the default port when the participant omits them.
+
+    ``192.168.1.10`` → ``http://192.168.1.10:8443``;
+    ``http://host:9000`` and ``http://host`` (→ 8443) both stay valid.
+    """
+    value = (base_url or "").strip().rstrip("/")
+    if not value:
+        raise NetworkError("Введите адрес организатора")
+    if not value.startswith(("http://", "https://")):
+        value = "http://" + value
+    parts = urllib.parse.urlsplit(value)
+    if not parts.hostname:
+        raise NetworkError("Неверный адрес: укажите IP или имя компьютера")
+    try:
+        has_port = parts.port is not None
+    except ValueError as exc:  # invalid port text
+        raise NetworkError(f"Неверный порт в адресе: {exc}") from exc
+    netloc = parts.netloc
+    if not has_port:
+        netloc = f"{netloc}:{default_port}"
+    return urllib.parse.urlunsplit(
+        (parts.scheme, netloc, parts.path, parts.query, parts.fragment)
+    ).rstrip("/")
 
 
 def verify_cms_digest(cms: bytes, data: bytes) -> tuple[bool, str]:
@@ -773,9 +804,7 @@ class SessionClient:
     """Participant side: talks to the host's SessionServer."""
 
     def __init__(self, base_url: str, code: str):
-        base_url = base_url.strip().rstrip("/")
-        if not base_url.startswith(("http://", "https://")):
-            base_url = "http://" + base_url
+        base_url = normalize_base_url(base_url)
         self.base_url = base_url
         self.code = code.strip().upper()
         if not self.code:

@@ -263,9 +263,39 @@ def test_strict_order(source: bytes, failures: list[str]) -> None:
         server.shutdown()
 
 
+def test_helpers(failures: list[str]) -> None:
+    code = network._new_code()
+    if not code.isdigit() or len(code) != 6:
+        failures.append(f"код сессии должен быть 6 цифр, получен {code!r}")
+
+    cases = {
+        "192.168.1.10": "http://192.168.1.10:8443",
+        "192.168.1.10:9000": "http://192.168.1.10:9000",
+        "http://host": "http://host:8443",
+        "https://host:443": "https://host:443",
+        "host": "http://host:8443",
+    }
+    for raw, expected in cases.items():
+        actual = network.normalize_base_url(raw)
+        if actual != expected:
+            failures.append(f"адрес {raw!r}: ожидался {expected!r}, получен {actual!r}")
+
+    for bad in ("", "   "):
+        try:
+            network.normalize_base_url(bad)
+            failures.append(f"пустой адрес {bad!r} должен отклоняться")
+        except network.NetworkError:
+            pass
+
+    client = network.SessionClient("127.0.0.1", "123456")
+    if client.base_url != "http://127.0.0.1:8443":
+        failures.append(f"клиент не подставил порт: {client.base_url}")
+
+
 def main() -> int:
     source = find_fixture().read_bytes()
     failures: list[str] = []
+    test_helpers(failures)
     test_sequential(source, failures)
     test_parallel(source, failures)
     test_strict_order(source, failures)
