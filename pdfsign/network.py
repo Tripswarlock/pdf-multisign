@@ -97,6 +97,7 @@ class Participant:
     joined_at: str = ""
     signed_at: str = ""
     sig_b64: str = ""  # parallel mode only: detached CMS
+    is_host: bool = False  # the organizer joining with its own certificate
 
     @property
     def cert_info(self) -> "RemoteCertificate":
@@ -122,6 +123,7 @@ class Participant:
             "order": self.order,
             "joined_at": self.joined_at,
             "signed_at": self.signed_at,
+            "is_host": self.is_host,
         }
 
 
@@ -139,6 +141,19 @@ class RemoteCertificate:
 
 def _now() -> str:
     return dt.datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+
+
+def certificate_payload(cert) -> dict:
+    """Participant data taken from a local certificate (duck-typed)."""
+    return {
+        "name": getattr(cert, "display_name", "") or "Участник",
+        "organization": getattr(cert, "organization", "") or "",
+        "position": getattr(cert, "position", "") or "",
+        "cert_name": getattr(cert, "common_name", "") or "",
+        "validity_text": getattr(cert, "validity_text", "") or "",
+        "serial": getattr(cert, "serial", "") or "",
+        "thumbprint": getattr(cert, "thumbprint", "") or "",
+    }
 
 
 _INVALID_FILE_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
@@ -248,6 +263,8 @@ class SignSession:
         self.finished = False
         self.finish_note = ""
         self._participants: list[Participant] = []
+        # the organizer may join with its own certificate and sign as well
+        self.host_pid = ""
         # sequential mode: (token, prepared revision) reserved for one signer
         self._pending: tuple[str, object] | None = None
 
@@ -294,10 +311,12 @@ class SignSession:
                     else "Параллельная подпись (соподпись)"
                 ),
                 "strict_order": self.config.strict_order,
+                "protocol": self.config.protocol,
                 "doc_version": self.version,
                 "started_at": self.started_at,
                 "finished": self.finished,
                 "finish_note": self.finish_note,
+                "host_pid": self.host_pid,
                 "participants": [item.public() for item in sorted(
                     self._participants, key=lambda p: p.order
                 )],
@@ -334,6 +353,48 @@ class SignSession:
             )
             self._participants.append(participant)
             return participant, self.version
+
+    def join_host(self, info: dict) -> Participant:
+        """Register the organizer as a signer with its own certificate.
+
+        The organizer joins at the end of the queue, so a running session is not
+        disturbed; its row can then be moved like any other participant's.  The
+        returned token is used exactly like a participant token for
+        ``prepare_signature``/``commit_signature`` or ``submit_signature``.
+        """
+        name = str(info.get("name") or "").strip()
+        if not name:
+            raise NetworkError("Не удалось определить имя из сертификата организатора")
+        with self._lock:
+            if self.finished:
+                raise NetworkError("Сессия завершена")
+            if self.host_pid:
+                existing = self._by_pid(self.host_pid)
+                if existing is not None:
+                    return existing
+            thumb = str(info.get("thumbprint") or "").strip().upper()
+            if thumb and any(
+                p.thumbprint == thumb and p.status != STATUS_DECLINED
+                for p in self._participants
+            ):
+                raise NetworkError("Этот сертификат уже участвует в сессии")
+            participant = Participant(
+                token=secrets.token_hex(12),
+                pid=secrets.token_hex(4),
+                name=name,
+                organization=str(info.get("organization") or "").strip(),
+                position=str(info.get("position") or "").strip(),
+                cert_name=str(info.get("cert_name") or "").strip(),
+                validity_text=str(info.get("validity_text") or "").strip(),
+                serial=str(info.get("serial") or "").strip(),
+                thumbprint=thumb,
+                order=max((p.order for p in self._participants), default=0) + 1,
+                joined_at=_now(),
+                is_host=True,
+            )
+            self._participants.append(participant)
+            self.host_pid = participant.pid
+            return participant
 
     def set_status(self, token: str, status: str, detail: str = "") -> None:
         if status not in (STATUS_PENDING, STATUS_SIGNING, STATUS_ERROR):
@@ -698,7 +759,10 @@ def render_status_page(snapshot: dict, host_hint: str) -> str:
             "<tr><td>{order}</td><td>{name}</td><td>{org}</td>"
             '<td class="{cls}">{label}</td><td>{time}</td></tr>'.format(
                 order=item["order"],
-                name=html.escape(item["name"]),
+                name=html.escape(
+                    item["name"]
+                    + (" (организатор)" if item.get("is_host") else "")
+                ),
                 org=html.escape(item["organization"] or "—"),
                 cls=status_class,
                 label=html.escape(item["status_label"]),
@@ -793,6 +857,7 @@ def _make_handler(session: SignSession) -> type[BaseHTTPRequestHandler]:
                         "mode": snap["mode"],
                         "mode_label": snap["mode_label"],
                         "strict_order": snap["strict_order"],
+                        "protocol": snap["protocol"],
                         "doc_version": snap["doc_version"],
                         "started_at": snap["started_at"],
                         "finished": snap["finished"],
@@ -1015,15 +1080,9 @@ class SessionClient:
             raise NetworkError("Сервер вернул неверный ответ") from exc
 
     def join(self, cert) -> None:
-        raw, _, _ = self._request("/api/join?code=" + self.code, {
-            "name": getattr(cert, "display_name", "") or "Участник",
-            "organization": getattr(cert, "organization", "") or "",
-            "position": getattr(cert, "position", "") or "",
-            "cert_name": getattr(cert, "common_name", "") or "",
-            "validity_text": getattr(cert, "validity_text", "") or "",
-            "serial": getattr(cert, "serial", "") or "",
-            "thumbprint": getattr(cert, "thumbprint", "") or "",
-        })
+        raw, _, _ = self._request(
+            "/api/join?code=" + self.code, certificate_payload(cert)
+        )
         try:
             answer = json.loads(raw.decode("utf-8"))
         except ValueError as exc:

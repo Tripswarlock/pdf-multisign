@@ -382,6 +382,94 @@ def test_order(source: bytes, failures: list[str]) -> None:
         failures.append(f"подписавший участник должен остаться первым: {order}")
 
 
+def test_host_signing(source: bytes, failures: list[str]) -> None:
+    """The organizer joins with its own certificate and signs the document."""
+    import io
+    import zipfile
+
+    # parallel (соподпись): the organizer's .sig goes into the package
+    session = network.SignSession(
+        source, network.SessionConfig(mode=network.MODE_PARALLEL, doc_name="test.pdf")
+    )
+    host = session.join_host({
+        "name": "Организатор Тестов",
+        "organization": "ООО «Орг»",
+        "thumbprint": "HOST1",
+    })
+    if not host.is_host:
+        failures.append("организатор должен помечаться is_host")
+    public = session.snapshot()["participants"]
+    if not public or not public[0].get("is_host"):
+        failures.append("в состоянии сессии нет признака организатора")
+    if session.host_pid != host.pid:
+        failures.append("host_pid не совпадает с участником-организатором")
+    again = session.join_host({"name": "Повтор", "thumbprint": "HOST1"})
+    if again.pid != host.pid:
+        failures.append("повторный вход организатора должен возвращать того же участника")
+
+    session.submit_signature(host.token, session.version, make_test_cms(source))
+    document, files, _note = session.results()
+    if document != source:
+        failures.append("соподпись: документ не должен меняться")
+    if len(files) != 1 or "Организатор" not in files[0][0]:
+        failures.append(f"подпись организатора не попала в .sig: {files}")
+    names = zipfile.ZipFile(io.BytesIO(session.package_zip())).namelist()
+    if not any("Организатор" in name and name.endswith(".pdf.sig") for name in names):
+        failures.append(f"в архиве нет .sig организатора: {names}")
+    page = network.render_status_page(session.snapshot(), "127.0.0.1:8443")
+    if "организатор" not in page:
+        failures.append("веб-страница статусов не помечает организатора")
+    try:
+        session.join({"name": "Дубль", "thumbprint": "HOST1"})
+        failures.append("сертификат организатора не должен пускать второго участника")
+    except network.NetworkError:
+        pass
+
+    # sequential: the organizer joins at the end and signs a revision
+    seq = network.SignSession(
+        source, network.SessionConfig(mode=network.MODE_SEQUENTIAL, doc_name="test.pdf")
+    )
+    participant = seq.join({"name": "Участник", "thumbprint": "P1"})[0]
+    host2 = seq.join_host({"name": "Организатор", "thumbprint": "H1"})
+    if host2.order != 2:
+        failures.append(f"организатор должен встать в конец очереди: {host2.order}")
+    signed_bytes, _version = seq.prepare_signature(host2.token)
+    seq.commit_signature(host2.token, make_test_cms(signed_bytes))
+    check_final_document(seq.document_bytes(), 1, failures)
+    seq_snapshot = seq.snapshot()
+    if not any(p["is_host"] for p in seq_snapshot["participants"]):
+        failures.append("организатор потерялся в состоянии последовательной сессии")
+
+    # strict order: the organizer joined last waits for the first participant
+    strict = network.SignSession(
+        source,
+        network.SessionConfig(
+            mode=network.MODE_SEQUENTIAL, strict_order=True, doc_name="test.pdf"
+        ),
+    )
+    first = strict.join({"name": "Первый", "thumbprint": "S1"})[0]
+    boss = strict.join_host({"name": "Организатор", "thumbprint": "SH"})
+    try:
+        strict.prepare_signature(boss.token)
+        failures.append("строгая очередь: организатор не должен подписывать раньше первого")
+    except network.NetworkError:
+        pass
+    signed_first, _version = strict.prepare_signature(first.token)
+    strict.commit_signature(first.token, make_test_cms(signed_first))
+    signed_boss, _version = strict.prepare_signature(boss.token)
+    strict.commit_signature(boss.token, make_test_cms(signed_boss))
+    check_final_document(strict.document_bytes(), 2, failures)
+
+    # a finished session does not accept the organizer
+    finished = network.SignSession(source, network.SessionConfig(doc_name="test.pdf"))
+    finished.finalize("done")
+    try:
+        finished.join_host({"name": "Поздно", "thumbprint": "L"})
+        failures.append("завершённая сессия не должна принимать организатора")
+    except network.NetworkError:
+        pass
+
+
 def main() -> int:
     source = find_fixture().read_bytes()
     failures: list[str] = []
@@ -390,12 +478,13 @@ def main() -> int:
     test_parallel(source, failures)
     test_strict_order(source, failures)
     test_order(source, failures)
+    test_host_signing(source, failures)
     if failures:
         print("FAILED")
         for failure in failures:
             print("  -", failure)
         return 1
-    print("OK: последовательный и параллельный режимы, очередь, отказы, .sig")
+    print("OK: последовательный и параллельный режимы, очередь, отказы, .sig, подпись организатора")
     return 0
 
 

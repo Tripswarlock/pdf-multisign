@@ -26,7 +26,7 @@ REGIONS: dict[str, list[tuple[int, int, int, int]]] = {
         (488, 588, 648, 726),     # tiny visible signature blocks in the preview
     ],
     "session-join.png": [
-        (50, 250, 706, 416),      # certificate rows in the join dialog
+        (48, 320, 708, 454),      # certificate rows (name, org, validity)
     ],
     "signature-block.png": [
         (883, 608, 1172, 890),    # both visible signature stamps on the page

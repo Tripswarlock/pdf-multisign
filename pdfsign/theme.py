@@ -174,6 +174,27 @@ def stylesheet() -> str:
     }}
     QPushButton#Text:hover {{ background: {SURFACE_CONTAINER_HIGH}; }}
     QPushButton#Text:pressed {{ background: {SURFACE_VARIANT}; }}
+    QPushButton#Text:disabled {{
+        color: {OUTLINE};
+        background: transparent;
+        border-color: transparent;
+    }}
+
+    QPushButton#Outline {{
+        background: transparent;
+        color: {PRIMARY};
+        border: 1px solid {PRIMARY};
+        border-radius: 10px;
+        padding: 6px 14px;
+        font-weight: 600;
+    }}
+    QPushButton#Outline:hover {{ background: {PRIMARY_CONTAINER}; }}
+    QPushButton#Outline:pressed {{ background: {SURFACE_VARIANT}; }}
+    QPushButton#Outline:disabled {{
+        color: {OUTLINE};
+        border-color: {OUTLINE_VARIANT};
+        background: transparent;
+    }}
 
     QComboBox {{
         background: {SURFACE_CONTAINER_HIGH};
