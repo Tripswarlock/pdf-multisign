@@ -226,7 +226,7 @@ def build(version: str, out_dir: Path) -> Path:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--version", default="1.2.0")
+    parser.add_argument("--version", default="1.1.0")
     parser.add_argument("--out", default="dist")
     args = parser.parse_args()
     out_dir = (ROOT / args.out) if not os.path.isabs(args.out) else Path(args.out)
@@ -237,5 +237,6 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
 
 

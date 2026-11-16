@@ -12,9 +12,9 @@
 
 Готовые сборки — в [GitHub Releases](https://github.com/Tripswarlock/pdf-multisign/releases):
 
-- `PDF-Multisign-1.2.0-win64.msi` — установщик для Windows (мастер, ярлык в меню, запись в «Приложения»);
+- `PDF-Multisign-1.1.0-win64.msi` — установщик для Windows (мастер, ярлык в меню, запись в «Приложения»);
 - `PDF-Multisign.exe` — portable-сборка для Windows (один файл, Python не нужен);
-- `pdf-multisign_1.2.0_amd64.deb` — пакет для Debian/Astra/Ubuntu.
+- `pdf-multisign_1.1.0_amd64.deb` — пакет для Debian/Astra/Ubuntu.
 
 ## Установка
 
@@ -23,14 +23,14 @@
 1. Установите **CryptoPro CSP 5.0 R2+** с компонентом CAdES Browser Plug-in.
 2. Установите сертификат в `CurrentUser\My`, проверьте: `certutil -user -store My`.
 3. Установите программу:
-   - `PDF-Multisign-1.2.0-win64.msi` — обычный установщик, ставит в
+   - `PDF-Multisign-1.1.0-win64.msi` — обычный установщик, ставит в
      `Program Files\PDF Мультиподпись` и создаёт ярлык в меню «Пуск»;
    - либо запустите `PDF-Multisign.exe` без установки.
 
 ### Linux (Astra 1.8, Debian 12, Ubuntu 22.04+)
 
 ```bash
-sudo apt install ./pdf-multisign_1.2.0_amd64.deb
+sudo apt install ./pdf-multisign_1.1.0_amd64.deb
 pdf-multisign
 ```
 
@@ -217,7 +217,7 @@ powershell -ExecutionPolicy Bypass -File packaging\windows\build_msi.ps1
 
 # Linux .deb (собирается и на Windows, и на Linux)
 python packaging\fetch_linux_vendor.py
-python packaging\linux\build_deb.py --version 1.2.0 --out dist
+python packaging\linux\build_deb.py --version 1.1.0 --out dist
 ```
 
 Для MSI нужен WiX 3.14 в `tools\wix` (`wix314-binaries.zip`), для exe —
@@ -257,5 +257,6 @@ resources/        иконка PNG/ICO
 только для предпросмотра и рендера страниц), pypdf — BSD-3-Clause, pywin32 —
 PSF, asn1crypto — MIT, gostcrypto — MIT. CryptoPro CSP не входит в поставку и
 лицензируется отдельно.
+
 
 

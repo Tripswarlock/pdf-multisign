@@ -1,7 +1,7 @@
 # Build the portable Windows executable with PyInstaller.
 # Usage: powershell -ExecutionPolicy Bypass -File packaging\windows\build_exe.ps1
 param(
-    [string]$Version = "1.2.0",
+    [string]$Version = "1.1.0",
     [string]$OutDir = "dist"
 )
 
@@ -54,5 +54,6 @@ if (-not (Test-Path $target)) {
 }
 $size = [math]::Round((Get-Item $target).Length / 1MB, 1)
 Write-Host "собран $target ($size МБ)"
+
 
 

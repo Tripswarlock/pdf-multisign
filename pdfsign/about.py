@@ -71,7 +71,7 @@ def build_about_html() -> str:
     muted = theme.ON_SURFACE_VARIANT
     state_color = theme.SUCCESS if available else theme.ERROR
     crypto_note = detail.replace("&", "&amp;").replace("<", "&lt;")
-    platform_text = f"{platform.system()} {platform.release()} · {platform.machine()}"
+    platform_text = f"{platform.system()} · {platform.machine()}"
 
     return f"""
     <h2 style="margin:0 0 2px 0;">{APP_NAME}</h2>
