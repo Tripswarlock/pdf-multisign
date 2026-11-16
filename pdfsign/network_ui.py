@@ -197,39 +197,32 @@ class HostSetupDialog(QDialog):
         card, card_layout = _card("Схема подписания")
         _shadow(card)
 
-        self._sequential = QRadioButton(
-            "Последовательная подпись — рекомендуется"
-        )
+        self._sequential = QRadioButton("Последовательная подпись (Рекомендуется)")
         self._sequential.setChecked(True)
         card_layout.addWidget(self._sequential)
         seq_hint = QLabel(
-            "Каждый участник подписывает текущую версию документа, подпись встраивается в PDF "
-            "новой ревизией и покрывает все предыдущие. Итог — один PDF с цепочкой подписей, "
-            "очередность виз зафиксирована."
+            "Каждый участник подписывает актуальную версию документа, встраивая "
+            "свою подпись в PDF. Итог — один файл с цепочкой подписей."
         )
         seq_hint.setObjectName("Caption")
         seq_hint.setWordWrap(True)
         card_layout.addWidget(seq_hint)
 
-        self._strict = QCheckBox("Строгая очередь: подписывает только следующий по списку участник")
-        card_layout.addWidget(self._strict)
-
-        self._parallel = QRadioButton("Параллельная подпись (соподпись)")
-        card_layout.addWidget(self._parallel)
-        par_hint = QLabel(
-            "Каждый участник независимо подписывает исходный файл — для равноправных сторон. "
-            "Итог: исходный PDF и отдельные файлы .sig (CAdES) каждого подписанта."
+        # sub-options nested under the sequential scheme
+        sub = QWidget()
+        sub_layout = QVBoxLayout(sub)
+        sub_layout.setContentsMargins(38, 0, 0, 0)
+        sub_layout.setSpacing(8)
+        self._strict = QCheckBox(
+            "Строгая очередь — подписывать можно только строго по очереди "
+            "из списка участников"
         )
-        par_hint.setObjectName("Caption")
-        par_hint.setWordWrap(True)
-        card_layout.addWidget(par_hint)
-
-        self._visible = QCheckBox("Видимый блок подписи на странице (последовательная схема)")
-        self._visible.setChecked(False)
-        card_layout.addWidget(self._visible)
-
+        sub_layout.addWidget(self._strict)
+        self._visible = QCheckBox("Видимый штамп подписи в документе")
+        sub_layout.addWidget(self._visible)
         page_row = QHBoxLayout()
-        page_caption = QLabel("Страница блока подписи")
+        page_row.setContentsMargins(24, 0, 0, 0)
+        page_caption = QLabel("Страница штампа")
         page_caption.setObjectName("Caption")
         self._page_combo = QComboBox()
         self._page_combo.addItem("Последняя", -1)
@@ -237,7 +230,18 @@ class HostSetupDialog(QDialog):
             self._page_combo.addItem(f"Страница {index + 1}", index)
         page_row.addWidget(page_caption)
         page_row.addWidget(self._page_combo, 1)
-        card_layout.addLayout(page_row)
+        sub_layout.addLayout(page_row)
+        card_layout.addWidget(sub)
+
+        self._parallel = QRadioButton("Параллельная подпись (соподпись)")
+        card_layout.addWidget(self._parallel)
+        par_hint = QLabel(
+            "Каждый участник независимо подписывает исходный файл. Итог — "
+            "исходный PDF и отдельные файлы .sig для каждого подписанта."
+        )
+        par_hint.setObjectName("Caption")
+        par_hint.setWordWrap(True)
+        card_layout.addWidget(par_hint)
 
         layout.addWidget(card)
 
@@ -255,12 +259,14 @@ class HostSetupDialog(QDialog):
 
         self._sequential.toggled.connect(self._toggle_scheme)
         self._parallel.toggled.connect(self._toggle_scheme)
+        self._visible.toggled.connect(self._toggle_scheme)
+        self._toggle_scheme()
 
     def _toggle_scheme(self) -> None:
         sequential = self._sequential.isChecked()
         self._strict.setEnabled(sequential)
         self._visible.setEnabled(sequential)
-        self._page_combo.setEnabled(sequential)
+        self._page_combo.setEnabled(sequential and self._visible.isChecked())
 
     def _start(self) -> None:
         self.config = network.SessionConfig(
